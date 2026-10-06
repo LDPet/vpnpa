@@ -1,0 +1,9 @@
+---
+description: listen и http_listen только на loopback
+globs: internal/ingress/**/*.go,internal/config/**/*.go
+alwaysApply: false
+---
+
+Слушать только loopback. `ingress.Listen` (`requireLoopback`) и `config.requireLoopback` разбирают host через `netip.ParseAddr` и требуют `IsLoopback`. Hostname, пустой host и не-loopback отклоняются, `net.Listen` не вызывается.
+
+По умолчанию `127.0.0.1:1080` и `127.0.0.1:8080`. `listen` и `http_listen` должны различаться.

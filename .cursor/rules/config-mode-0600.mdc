@@ -1,0 +1,9 @@
+---
+description: config.yaml и файлы ключей только mode 0600
+globs: internal/config/**/*.go,internal/atomicfile/**/*.go,internal/backend/amneziawg/keys.go
+alwaysApply: false
+---
+
+`config.FileMode` — `0600`. `Save` и `InstallConfig` пишут этим режимом и вызывают `Chmod`. Каталог конфига — `0700`.
+
+Перезапись не ослабляет права. `atomicfile.Write` для уже существующего файла прогоняет mode через `restrictPerm`: биты group/world, которых у файла нет, не появляются. Файл ключа `keys/<id>` тоже `0600` (`writeKeyFile`).
