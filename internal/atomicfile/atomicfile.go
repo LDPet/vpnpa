@@ -1,6 +1,7 @@
-// Package atomicfile writes a file by creating a temporary sibling and renaming
-// it into place. Readers never observe a partial file, and an existing file
-// does not gain group or world permission bits.
+// Package atomicfile записывает файл через временного соседа и rename.
+// Читатель не видит обрезанный файл: rename в одном каталоге атомарен.
+// Так пишутся конфиг, status.json, prefer и unit. Обновление бинарника
+// в internal/cli использует тот же приём отдельно.
 package atomicfile
 
 import (
@@ -9,10 +10,10 @@ import (
 	"path/filepath"
 )
 
-// Write creates path with mode using a temp file in the same directory.
-// mode is the permission of a new file. When path already exists, group and
-// world bits that are not already set are cleared so a rewrite cannot weaken
-// a 0600 config or state file.
+// Write создаёт path с правами mode. Данные сначала попадают во временный
+// файл в том же каталоге, сбрасываются на диск и только потом переименовываются
+// поверх path. Если path уже есть, групповые и «мировые» биты, которых у него
+// не было, снимаются: перезапись не может ослабить конфиг или state с правами 0600.
 func Write(path string, data []byte, mode os.FileMode) error {
 	if path == "" || path == "." {
 		return fmt.Errorf("atomicfile: empty path")
@@ -46,12 +47,14 @@ func Write(path string, data []byte, mode os.FileMode) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	if err := f.Chmod(mode); err != nil { // #nosec G302 -- mode is 0600 for secrets; an existing file cannot gain group or world bits
+	if err := f.Chmod(mode); err != nil { // #nosec G302 -- для секретов mode 0600; у существующего файла group/world не прибавляются
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
+	// Rename в том же каталоге подменяет inode атомарно. Каталог тоже
+	// синхронизируется, иначе после сбоя запись может не доехать до диска.
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
@@ -63,8 +66,9 @@ func Write(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-// restrictPerm keeps owner bits from requested and drops group/world bits
-// that the existing file does not already have.
+// restrictPerm берёт биты владельца из requested. Group и world остаются
+// только на пересечении requested и existing. Запрос 0600 на файл 0644
+// даёт 0600: чужие биты, которых нет в запросе, не сохраняются.
 func restrictPerm(existing, requested os.FileMode) os.FileMode {
 	const groupWorld = os.FileMode(0o077)
 	return (requested &^ groupWorld) | (requested & existing & groupWorld)

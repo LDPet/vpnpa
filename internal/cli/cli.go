@@ -1,4 +1,8 @@
-// Package cli implements the vpnpa commands.
+// Package cli — команды vpnpa. run крутит демон в этом процессе.
+// add и add-socks5 пишут конфиг и шлют SIGHUP живому `vpnpa run`, сверив MainPID.
+// prefer только пишет файл. list и status читают файлы. logs зовёт journalctl.
+// up, down, enable и disable зовут systemctl --user. update подменяет бинарник
+// и перезапускает сервис, только если тот уже active.
 package cli
 
 import (
@@ -24,15 +28,19 @@ import (
 	"github.com/LDPet/vpnpa/internal/unitfile"
 )
 
-// Runner executes host commands such as systemctl. Tests substitute it.
+// Runner запускает команды хоста вроде systemctl. Тесты подставляют свою реализацию.
 type Runner interface {
+	// Run выполняет команду. Ненулевой код возврата становится ошибкой.
 	Run(ctx context.Context, name string, args ...string) error
+	// Output выполняет команду и возвращает её stdout.
 	Output(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-// ExecRunner uses os/exec and inherits stdout and stderr for Run.
+// ExecRunner зовёт os/exec. Run наследует stdout и stderr процесса,
+// чтобы systemctl и journalctl писали туда же, куда vpnpa.
 type ExecRunner struct{}
 
+// Run выполняет команду и пробрасывает её код возврата.
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = os.Stdout
@@ -40,16 +48,18 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) error {
 	return cmd.Run()
 }
 
+// Output выполняет команду и возвращает stdout. Так читается MainPID перед SIGHUP.
 func (ExecRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
-// Main runs one invocation. args does not include the program name.
+// Main выполняет один запуск. args без имени программы.
+// Возврат — код процесса: 0, 1 (ошибка) или 2 (пользование).
 func Main(args []string) int {
 	return MainWith(args, ExecRunner{}, os.Stdout, os.Stderr)
 }
 
-// MainWith is Main with injected dependencies.
+// MainWith — Main с подставленными командами хоста и потоками. Нужен тестам.
 func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 	global, rest := splitGlobal(args)
 	fs := flag.NewFlagSet("vpnpa", flag.ContinueOnError)
@@ -133,6 +143,8 @@ func layoutFrom(configPath, stateDir string) (paths.Layout, error) {
 	return layout, nil
 }
 
+// cmdInstall готовит каталоги, конфиг 0600 и user unit, затем daemon-reload.
+// Сервис не стартует: пустой список бэкендов не должен поднимать слушатели.
 func cmdInstall(ctx context.Context, layout paths.Layout, run Runner, stderr io.Writer) error {
 	if layout.UnitPath == "" || layout.BinPath == "" {
 		return fmt.Errorf("не удалось определить путь unit или бинарника")
@@ -194,6 +206,7 @@ func cmdAdd(ctx context.Context, layout paths.Layout, run Runner, socks bool, ar
 		return err
 	}
 	_, _ = fmt.Fprintf(stderr, "добавлен %s type=%s priority=%d\n", b.ID, b.Type, b.Priority)
+	// Живой демон подхватывает новую запись по SIGHUP, systemctl restart не нужен.
 	signalReload(ctx, run)
 	return nil
 }
@@ -219,6 +232,8 @@ func cmdList(layout paths.Layout, stdout io.Writer) error {
 	return nil
 }
 
+// cmdPrefer записывает id или "auto" в файл prefer. Демон перечитывает его
+// на следующем цикле проб, отдельно слать сигнал не нужно.
 func cmdPrefer(layout paths.Layout, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("использование: vpnpa prefer <id>|auto")
@@ -246,6 +261,8 @@ func cmdPrefer(layout paths.Layout, args []string) error {
 	return atomicfile.Write(layout.PreferPath(), []byte(choice+"\n"), 0o600)
 }
 
+// cmdRun — передний план демона, то, что стоит в ExecStart user unit.
+// Сигналы включены: SIGHUP перечитывает конфиг, SIGINT и SIGTERM выходят.
 func cmdRun(layout paths.Layout, level, format string) error {
 	f, err := config.Load(layout.ConfigPath)
 	if err != nil {
@@ -348,15 +365,19 @@ func cmdEnable(ctx context.Context, run Runner, stdout io.Writer) error {
 	return nil
 }
 
-// killProc and the /proc readers are replaced in tests.
+// killProc и чтение /proc подменяются в тестах.
 var (
 	killProc    = syscall.Kill
 	procExe     = func(pid int) (string, error) { return os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)) }
 	procCmdline = func(pid int) ([]byte, error) {
-		return os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)) // #nosec G304 -- pid is the numeric MainPID from systemctl
+		return os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)) // #nosec G304 -- pid это числовой MainPID от systemctl
 	}
 )
 
+// signalReload посылает SIGHUP MainPID user unit. Ошибка systemctl и мёртвый
+// сервис тихо пропускаются: add уже записал конфиг, демон подхватит его при старте.
+// pid <= 1 отсекается. Перед сигналом isVpnpaRun проверяет, что это всё ещё
+// `vpnpa run`, а не чужой процесс, которому достался тот же номер.
 func signalReload(ctx context.Context, run Runner) {
 	out, err := run.Output(ctx, "systemctl", "--user", "show", "-p", "MainPID", "--value", "vpnpa.service")
 	if err != nil {
@@ -372,8 +393,10 @@ func signalReload(ctx context.Context, run Runner) {
 	_ = killProc(pid, syscall.SIGHUP)
 }
 
-// isVpnpaRun reports whether pid is the vpnpa daemon (argv contains "run"),
-// not a recycled PID or another command of the same binary.
+// isVpnpaRun сообщает, что pid — демон vpnpa: базовое имя exe равно vpnpa
+// и среди аргументов есть "run". Суффикс " (deleted)" снимается: после
+// `vpnpa update` ядро помечает так старый inode ещё живого процесса.
+// Чужой pid и другая команда того же бинарника сигнал не получают.
 func isVpnpaRun(pid int) bool {
 	exe, err := procExe(pid)
 	if err != nil {
@@ -426,8 +449,8 @@ func safeUser(s string) bool {
 	return true
 }
 
-// ensurePrivateDir creates path as 0700 and tightens an existing directory
-// to 0700. Relative paths and "." are left alone so the process cwd is not chmod'd.
+// ensurePrivateDir создаёт каталог с правами 0700 и ужимает уже существующий до 0700.
+// Относительный путь и "." не трогаются, чтобы не сделать chmod на cwd процесса.
 func ensurePrivateDir(path string) error {
 	if path == "" || path == "." || !filepath.IsAbs(path) {
 		return nil
@@ -445,6 +468,8 @@ func ensurePrivateDir(path string) error {
 	return os.Chmod(path, 0o700) // #nosec G302 -- каталог должен быть 0700, файл секретов остаётся 0600
 }
 
+// splitGlobal забирает глобальные флаги до имени команды, в том числе
+// когда они стоят после неё. Командные флаги (--id) остаются в rest.
 func splitGlobal(args []string) (global, rest []string) {
 	takesValue := map[string]bool{
 		"--config": true, "--log-level": true, "--log-format": true, "--state-dir": true,

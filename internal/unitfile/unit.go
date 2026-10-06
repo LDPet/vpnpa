@@ -1,11 +1,15 @@
-// Package unitfile renders the systemd --user unit.
+// Package unitfile собирает текст systemd user unit.
+// Это unit сессии (`systemctl --user`), не системный: директивы User= нет,
+// процесс идёт от пользователя, который сделал `vpnpa install`.
 package unitfile
 
 import "strings"
 
-// Text is the user unit installed by `vpnpa install`.
-// ExecStart runs `vpnpa run` in the foreground with the user config and state
-// directory. There is no User=root: systemd --user starts it as the session user.
+// Text возвращает unit, который пишет `vpnpa install`.
+// ExecStart запускает `vpnpa run` на переднем плане (Type=simple) с конфигом
+// и каталогом состояния. WantedBy=default.target поднимает сервис при входе
+// в пользовательскую сессию. После выхода из сессии он живёт только если
+// включён linger (`loginctl enable-linger`), сам unit linger не включает.
 func Text(bin, configPath, stateDir string) string {
 	return `[Unit]
 Description=vpnpa local VPN proxy
@@ -23,9 +27,9 @@ WantedBy=default.target
 `
 }
 
-// systemdArg quotes a path that contains whitespace or quotes and doubles %
-// so systemd does not treat it as a specifier. Plain paths stay unquoted so
-// the unit matches the usual ~/.local layout.
+// systemdArg готовит путь к ExecStart. Обычный путь ~/.local остаётся без кавычек.
+// Пробел, кавычка или обратный слэш заключаются в кавычки. Каждый % удваивается:
+// иначе systemd прочитает его как спецификатор (%h, %u и т.д.) и подменит путь.
 func systemdArg(s string) string {
 	s = strings.ReplaceAll(s, "%", "%%")
 	if s == "" || strings.ContainsAny(s, " \t\"\\") {

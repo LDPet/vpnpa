@@ -1,5 +1,6 @@
-// Package socks5 is a localhost SOCKS5 CONNECT ingress (RFC 1928).
-// The destination hostname is forwarded unchanged; this package does not resolve it.
+// Package socks5 — локальный вход SOCKS5 CONNECT (RFC 1928).
+// Имя назначения пересылается дальше без резолва. Это пакет входа;
+// выход через чужой SOCKS5 — internal/backend/socks5.
 package socks5
 
 import (
@@ -24,13 +25,14 @@ func init() {
 	})
 }
 
-// Server listens for SOCKS5 CONNECT. UDP ASSOCIATE is rejected.
+// Server слушает SOCKS5 CONNECT. UDP ASSOCIATE и BIND отклоняются и наружу не звонят.
+// Аутентификация только method 0x00 (без пароля): локальный сокет и так на loopback.
 type Server struct {
 	Addr string
 	Log  *slog.Logger
 }
 
-// New returns a SOCKS5 ingress.
+// New возвращает вход SOCKS5 на addr. Сокет откроет Serve, и только если addr — loopback.
 func New(addr string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -38,8 +40,8 @@ func New(addr string, log *slog.Logger) *Server {
 	return &Server{Addr: addr, Log: log}
 }
 
-// Serve accepts until ctx is cancelled. Cancellation closes the listener and
-// both sides of every accepted connection.
+// Serve принимает соединения, пока ctx не отменён. Отмена закрывает слушатель
+// и обе стороны каждого принятого соединения.
 func (s *Server) Serve(ctx context.Context, d dialer.Dialer) error {
 	ln, err := ingress.Listen(s.Addr)
 	if err != nil {
@@ -103,6 +105,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, d dialer.Dialer) {
 	pipe(ctx, conn, remote)
 }
 
+// handshake принимает только SOCKS5 и method 0x00. Иного метода нет:
+// клиенту уходит 0xFF, имя назначения даже не читается.
 func handshake(br *bufio.Reader, w io.Writer) error {
 	ver, err := br.ReadByte()
 	if err != nil {
@@ -128,6 +132,9 @@ func handshake(br *bufio.Reader, w io.Writer) error {
 	return errors.New("no acceptable socks auth method")
 }
 
+// readConnect читает команду CONNECT и собирает host:port.
+// Имя (atyp 0x03) возвращается строкой. net.LookupHost здесь не вызывается:
+// резолв, если он нужен, делает бэкенд по ту сторону Dialer.
 func readConnect(br *bufio.Reader) (string, error) {
 	hdr := make([]byte, 4)
 	if _, err := io.ReadFull(br, hdr); err != nil {
@@ -179,6 +186,8 @@ func readAddr(r io.Reader, atyp byte) (string, error) {
 	}
 }
 
+// writeReply отвечает кодом rep. BND.ADDR — нули: клиенту не нужен адрес,
+// на котором vpnpa «принял» туннель, его нет.
 func writeReply(w io.Writer, rep byte) error {
 	return writeFull(w, []byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 }
@@ -197,6 +206,10 @@ func writeFull(w io.Writer, p []byte) error {
 	return nil
 }
 
+// pipe копирует байты в обе стороны. Когда io.Copy из b в a дочитал EOF,
+// closeWrite вызывается на a — на стороне, куда писали, — и отдаёт EOF
+// получателю, не обрывая копирование в обратную сторону. Второе направление
+// симметрично.
 func pipe(ctx context.Context, a, b net.Conn) {
 	done := make(chan struct{})
 	go func() {

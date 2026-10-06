@@ -1,4 +1,6 @@
-// Package paths holds the rootless locations vpnpa uses on Linux.
+// Package paths — каталоги rootless-установки vpnpa на Linux.
+// Всё лежит в домашнем каталоге пользователя: конфиг, state, user unit и бинарник.
+// root и /etc не используются.
 package paths
 
 import (
@@ -11,15 +13,19 @@ const (
 	stateDirName  = "vpnpa"
 )
 
-// Layout is the set of files one vpnpa installation uses.
+// Layout — файлы одной установки vpnpa.
 type Layout struct {
+	// ConfigPath — ~/.config/vpnpa/config.yaml, права 0600: в URI есть ключ или пароль.
 	ConfigPath string
-	StateDir   string
-	UnitPath   string
-	BinPath    string
+	// StateDir — ~/.local/state/vpnpa: status.json, prefer и каталог keys.
+	StateDir string
+	// UnitPath — ~/.config/systemd/user/vpnpa.service, не системный unit.
+	UnitPath string
+	// BinPath — ~/.local/bin/vpnpa, его подменяет `vpnpa update` через rename.
+	BinPath string
 }
 
-// Default resolves paths under the user's home directory.
+// Default строит раскладку от домашнего каталога текущего пользователя.
 func Default() (Layout, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -28,7 +34,7 @@ func Default() (Layout, error) {
 	return FromHome(home), nil
 }
 
-// FromHome builds a layout rooted at home.
+// FromHome строит раскладку от заданного home. Удобно в тестах и при установке.
 func FromHome(home string) Layout {
 	return Layout{
 		ConfigPath: filepath.Join(home, ".config", configDirName, "config.yaml"),
@@ -38,17 +44,19 @@ func FromHome(home string) Layout {
 	}
 }
 
-// StatusPath is the atomically rewritten daemon status file.
+// StatusPath — status.json. Демон переписывает его целиком через rename на каждом цикле проб.
 func (l Layout) StatusPath() string {
 	return filepath.Join(l.StateDir, "status.json")
 }
 
-// PreferPath is reread by the daemon on every probe cycle.
+// PreferPath — файл prefer. Балансировщик перечитывает его на каждом цикле проб,
+// отдельный сигнал для смены предпочтения не нужен.
 func (l Layout) PreferPath() string {
 	return filepath.Join(l.StateDir, "prefer")
 }
 
-// KeysDir stores API X25519 keypairs, one file per backend id.
+// KeysDir — каталог пар X25519 для API-ссылок, по файлу на id бэкенда.
+// Пара переиспользуется, пока URI не изменился.
 func (l Layout) KeysDir() string {
 	return filepath.Join(l.StateDir, "keys")
 }

@@ -16,6 +16,8 @@ const (
 	defaultAppVersion = "4.8.12.9"
 )
 
+// apiRequest — тело POST, которым клиент Amnezia представляется серверу.
+// Сервер выдаёт туннель на PublicKey; смена ключа при том же URI была бы новым клиентом.
 type apiRequest struct {
 	PublicKey  string `json:"public_key"`
 	OSVersion  string `json:"os_version"`
@@ -23,8 +25,8 @@ type apiRequest struct {
 	UUID       string `json:"uuid"`
 }
 
-// httpClient is replaced in tests when they need a custom transport.
-// Redirects are not followed: a vpn:// link must not move the API key to another host.
+// httpClient вынесен переменной. Текущие тесты ходят им в httptest и не подменяют его.
+// Редиректы не следуются: ссылка vpn:// не должна унести API-ключ на другой хост.
 var httpClient = &http.Client{
 	Timeout: 20 * time.Second,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -32,6 +34,9 @@ var httpClient = &http.Client{
 	},
 }
 
+// fetchAPIConfig забирает полный конфиг по ссылке API.
+// Ключ передаётся заголовком Authorization: Api-Key, не в URL.
+// Ответ ограничен maxConfigBytes и дальше разбирается unwrapAPIBody.
 func fetchAPIConfig(ctx context.Context, endpoint, apiKey string, kp KeyPair) ([]byte, error) {
 	body, err := json.Marshal(apiRequest{
 		PublicKey:  kp.Public,
@@ -63,6 +68,9 @@ func fetchAPIConfig(ctx context.Context, endpoint, apiKey string, kp KeyPair) ([
 	return unwrapAPIBody(raw)
 }
 
+// unwrapAPIBody приводит разные формы ответа API к JSON конверта.
+// Встречаются: голое тело vpn://, JSON с полем config (vpn://, голый JSON
+// или base64 без префикса) и уже готовый конверт с containers.
 func unwrapAPIBody(raw []byte) ([]byte, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if bytes.HasPrefix(trimmed, []byte("vpn://")) {
@@ -78,7 +86,7 @@ func unwrapAPIBody(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("api json: %w", err)
 	}
 	if strings.TrimSpace(wrap.Config) == "" {
-		// The body itself may already be the full envelope.
+		// Тело само может уже быть полным конвертом, без обёртки config.
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(trimmed, &probe); err != nil {
 			return nil, fmt.Errorf("api json: %w", err)

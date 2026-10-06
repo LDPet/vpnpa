@@ -7,8 +7,8 @@ import (
 	"net/netip"
 )
 
-// Listen opens a TCP listener on a loopback address. A missing host, a
-// hostname, or any non-loopback IP is rejected and nothing is bound.
+// Listen открывает TCP только на loopback. Пустой хост, имя и любой не-loopback
+// IP отклоняются до bind: прокси не должен слушать сеть хоста.
 func Listen(addr string) (net.Listener, error) {
 	if err := requireLoopback(addr); err != nil {
 		return nil, err
@@ -31,9 +31,9 @@ func requireLoopback(addr string) error {
 	return nil
 }
 
-// CloseOnDone closes c when ctx is cancelled. Call the returned stop when the
-// handler is finished so a later cancellation does not close a recycled conn.
-// A nil conn yields a no-op stop.
+// CloseOnDone закрывает c, когда ctx отменён. Возвращённую stop вызывают,
+// когда обработчик закончил: иначе поздняя отмена закроет уже переиспользованный conn.
+// Для nil возвращается пустая stop.
 func CloseOnDone(ctx context.Context, c net.Conn) func() {
 	if c == nil {
 		return func() {}

@@ -1,4 +1,5 @@
-// Package config loads and writes the single YAML file vpnpa uses.
+// Package config читает и пишет единственный YAML vpnpa.
+// Файл всегда 0600: в URI vpn:// лежит приватный ключ, в socks5:// может быть пароль.
 package config
 
 import (
@@ -14,25 +15,29 @@ import (
 )
 
 const (
-	// FileMode is required because a vpn:// URI carries a private key and a
-	// socks5 URI may carry a password.
+	// FileMode обязателен: в URI vpn:// есть приватный ключ, в socks5:// может быть пароль.
 	FileMode os.FileMode = 0o600
 
-	DefaultListen     = "127.0.0.1:1080"
+	// DefaultListen — SOCKS5 на loopback, если в файле поле опущено.
+	DefaultListen = "127.0.0.1:1080"
+	// DefaultHTTPListen — HTTP CONNECT на loopback. Порт нарочно другой, чем у SOCKS5.
 	DefaultHTTPListen = "127.0.0.1:8080"
-	DefaultBalancer   = "sticky"
+	// DefaultBalancer — единственный реализованный тип балансировщика.
+	DefaultBalancer = "sticky"
 )
 
-// DefaultCheckURLs are tried in order. The first HTTP 204 wins.
+// DefaultCheckURLs опрашиваются по порядку. Первый HTTP 204 выигрывает,
+// второй остаётся запасным, если первый URL недоступен. Непустой check_urls
+// в файле заменяет эту пару целиком, а не дополняет её.
 var DefaultCheckURLs = []string{
 	"https://www.gstatic.com/generate_204",
 	"https://cp.cloudflare.com/generate_204",
 }
 
-// Duration is a YAML string such as "15s" or "5m".
+// Duration — строка YAML вида "15s" или "5m", не число наносекунд.
 type Duration time.Duration
 
-// UnmarshalYAML parses a Go duration string.
+// UnmarshalYAML разбирает строку длительности Go.
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
 	if err := value.Decode(&s); err != nil {
@@ -46,15 +51,15 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// MarshalYAML emits a Go duration string.
+// MarshalYAML пишет длительность строкой Go, чтобы файл оставался читаемым.
 func (d Duration) MarshalYAML() (any, error) {
 	return time.Duration(d).String(), nil
 }
 
-// Std returns the standard library duration.
+// Std возвращает длительность стандартной библиотеки.
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
-// File is the on-disk document.
+// File — документ на диске. Неизвестные поля YAML отвергаются.
 type File struct {
 	Listen     string    `yaml:"listen"`
 	HTTPListen string    `yaml:"http_listen"`
@@ -63,20 +68,25 @@ type File struct {
 	Log        Log       `yaml:"log"`
 }
 
-// Balancer is the sticky-balancer block.
+// Balancer — блок sticky. Ноль и пустые строки добираются в applyDefaults.
 type Balancer struct {
 	Type             string   `yaml:"type"`
 	CheckInterval    Duration `yaml:"check_interval"`
 	CheckTimeout     Duration `yaml:"check_timeout"`
 	FailThreshold    int      `yaml:"fail_threshold"`
 	RecoverThreshold int      `yaml:"recover_threshold"`
-	RestartInterval  Duration `yaml:"restart_interval"`
-	CheckURLs        []string `yaml:"check_urls"`
-	EgressURL        string   `yaml:"egress_url,omitempty"`
-	EgressInterval   Duration `yaml:"egress_interval,omitempty"`
+	// RestartInterval — пауза между Down+Up нетекущего мёртвого бэкенда.
+	// Текущий бэкенд этим интервалом не переподнимается.
+	RestartInterval Duration `yaml:"restart_interval"`
+	// CheckURLs — список проб. nil после разбора значит «взять умолчание».
+	// Пустой список и непустой список сохраняются: непустой заменяет пару
+	// generate_204, а не добавляется к ней.
+	CheckURLs      []string `yaml:"check_urls"`
+	EgressURL      string   `yaml:"egress_url,omitempty"`
+	EgressInterval Duration `yaml:"egress_interval,omitempty"`
 }
 
-// Backend is one egress entry.
+// Backend — одна запись выхода. URI не логируется: в нём ключ или пароль.
 type Backend struct {
 	ID       string `yaml:"id"`
 	Type     string `yaml:"type"`
@@ -84,14 +94,15 @@ type Backend struct {
 	URI      string `yaml:"uri"`
 }
 
-// Log selects slog level and format.
+// Log выбирает уровень и формат slog.
 type Log struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`
 }
 
-// KnownTypes are the backend and balancer types the config schema accepts.
-// A new protocol is registered in its package and added here.
+// KnownTypes — типы, которые схема конфига принимает.
+// Новый протокол регистрируется в своём пакете и добавляется сюда,
+// иначе файл с ним не пройдёт Validate, даже если фабрика уже есть.
 var KnownTypes = struct {
 	Backends []string
 	Balancer []string
@@ -100,7 +111,7 @@ var KnownTypes = struct {
 	Balancer: []string{"sticky"},
 }
 
-// Load reads path, applies defaults and validates the document.
+// Load читает path, подставляет умолчания и проверяет документ.
 func Load(path string) (File, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- путь конфигурации задаёт пользователь
 	if err != nil {
@@ -109,7 +120,7 @@ func Load(path string) (File, error) {
 	return Parse(raw)
 }
 
-// Parse decodes YAML, applies defaults and validates.
+// Parse разбирает YAML, подставляет умолчания и проверяет документ.
 func Parse(raw []byte) (File, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return File{}, fmt.Errorf("parse config: empty document")
@@ -127,8 +138,8 @@ func Parse(raw []byte) (File, error) {
 	return f, nil
 }
 
-// applyDefaults fills omitted fields. A present check_urls list replaces the
-// defaults entirely, including when a test supplies a single tcp:// probe.
+// applyDefaults заполняет пропущенные поля. Заданный список check_urls
+// заменяет умолчание целиком, в том числе когда тест даёт одну пробу tcp://.
 func (f *File) applyDefaults() {
 	if f.Listen == "" {
 		f.Listen = DefaultListen
@@ -171,7 +182,8 @@ func (f *File) applyDefaults() {
 	}
 }
 
-// Validate checks required fields, known types and loopback listeners.
+// Validate проверяет обязательные поля, известные типы и loopback-слушатели.
+// Слушать не-loopback нельзя: прокси не должен быть открыт в сеть хоста.
 func (f File) Validate() error {
 	if err := requireLoopback(f.Listen, "listen"); err != nil {
 		return err
@@ -277,7 +289,7 @@ func contains(list []string, v string) bool {
 	return false
 }
 
-// Template is the config written by install when no file exists yet.
+// Template — конфиг, который install пишет, только если файла ещё нет.
 func Template() string {
 	return `# vpnpa. Добавьте выход командой vpnpa add 'vpn://...' или vpnpa add-socks5 'socks5://...'.
 # В ссылке vpn:// есть приватный ключ, поэтому у файла права 0600.

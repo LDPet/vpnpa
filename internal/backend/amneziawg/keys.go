@@ -13,13 +13,16 @@ import (
 	"golang.org/x/crypto/curve25519"
 )
 
-// KeyPair is a WireGuard X25519 identity. Private and Public are standard base64.
+// KeyPair — личность WireGuard X25519. Private и Public — обычный base64,
+// как в conf-файле, не hex UAPI. UUID уходит в запрос API вместе с публичным ключом.
 type KeyPair struct {
 	Private string
 	Public  string
 	UUID    string
 }
 
+// storedKey — файл keys/<id>. URIHash привязывает пару к конкретной ссылке:
+// та же ссылка читает тот же ключ, другая ссылка на том же id порождает новую пару.
 type storedKey struct {
 	URIHash string `json:"uri_hash"`
 	Private string `json:"private"`
@@ -27,7 +30,10 @@ type storedKey struct {
 	UUID    string `json:"uuid"`
 }
 
-// GenerateKeyPair returns a clamped X25519 keypair and a random UUID.
+// GenerateKeyPair возвращает ключ X25519 и случайный UUID.
+// Две побитовые правки записывают в файл уже зажатый скаляр WireGuard.
+// curve25519.X25519 и так зажимает копию на время умножения; без этих строк
+// сохранённый секрет не совпал бы с каноническим видом ключа.
 func GenerateKeyPair() (KeyPair, error) {
 	var priv [32]byte
 	if _, err := rand.Read(priv[:]); err != nil {
@@ -65,8 +71,12 @@ func uriHash(uri string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// loadOrCreateKey returns the keypair stored for id while uri is unchanged.
-// A different uri replaces the file with a new keypair.
+// loadOrCreateKey возвращает пару, сохранённую для id, пока uri не изменился.
+// Хеш URI, а не сам URI, лежит на диске. Совпадение хеша и непустые ключи —
+// переиспользование: сервер API уже знает этот public key, новый handshake
+// не регистрирует другого клиента. Другой URI (или битый файл) заменяет файл
+// новой парой. Down бэкенда файл не удаляет, поэтому перезапуск демона
+// не вращает ключ.
 func loadOrCreateKey(dir, id, uri string) (KeyPair, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return KeyPair{}, err
@@ -101,8 +111,9 @@ func loadOrCreateKey(dir, id, uri string) (KeyPair, error) {
 	return kp, nil
 }
 
-// writeKeyFile replaces path atomically so a crash cannot leave a torn key
-// and rotate the public key on the next Up.
+// writeKeyFile подменяет path через rename в том же каталоге.
+// Обрыв на полпути не должен оставить рваный JSON: следующий Up прочитал бы
+// его как «другой ключ» и выпустил новый public key, хотя сервер помнит старый.
 func writeKeyFile(dir, path string, body []byte) error {
 	tmp, err := os.CreateTemp(dir, ".key-*")
 	if err != nil {

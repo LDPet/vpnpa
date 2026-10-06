@@ -11,10 +11,20 @@ import (
 	"strings"
 )
 
+// maxConfigBytes ограничивает и распакованный qCompress, и тело ответа API.
+// Длина из заголовка Qt не должна раздуть память.
 const maxConfigBytes = 8 << 20
 
-// DecodeURI strips vpn://, accepts Qt qCompress (4-byte length + zlib) and
-// raw JSON after base64url.
+// DecodeURI снимает префикс vpn:// и возвращает JSON конверта.
+//
+// Полезная нагрузка — base64 (url, стандартный или raw, добивка '=' необязательна).
+// Дальше два формата, которые кладёт клиент Amnezia:
+//
+//  1. Qt qCompress: 4 байта big-endian — длина несжатых данных, затем поток zlib.
+//     Длина сверяется с фактическим выходом zlib, чтобы отсечь чужой поток.
+//  2. Сырой JSON, если после base64 сразу '{' или '['. Так кодирует EncodeRawJSON.
+//
+// Это ещё не туннель: JSON может быть полным конфигом или ссылкой на API (см. IsAPI).
 func DecodeURI(uri string) ([]byte, error) {
 	s := strings.TrimSpace(uri)
 	s = strings.TrimPrefix(s, "vpn://")
@@ -49,11 +59,14 @@ func decodeBase64(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
+// tryQCompress узнаёт формат QByteArray::qCompress: длина несжатого тела
+// и сразу за ней zlib (RFC 1950), не голый deflate. Чужой префикс из 4 байт
+// не принимается, если zlib не сходится ровно в эту длину или это не JSON.
 func tryQCompress(raw []byte) ([]byte, bool) {
 	if len(raw) < 5 {
 		return nil, false
 	}
-	// Qt qCompress: 4-byte big-endian uncompressed length, then a zlib stream.
+	// Qt qCompress: 4 байта big-endian — длина несжатых данных, затем поток zlib.
 	n := int(binary.BigEndian.Uint32(raw[:4]))
 	if n <= 0 || n > maxConfigBytes {
 		return nil, false
@@ -74,12 +87,14 @@ func tryQCompress(raw []byte) ([]byte, bool) {
 	return trimmed, true
 }
 
-// EncodeURI qCompresses jsonBody and returns a vpn:// link.
+// EncodeURI сжимает jsonBody как qCompress и возвращает ссылку vpn://.
+// Нужен тестам и симметрии с клиентом Amnezia; демон сам ссылки не выпускает.
 func EncodeURI(jsonBody []byte) string {
 	return "vpn://" + base64.RawURLEncoding.EncodeToString(qCompress(jsonBody))
 }
 
-// EncodeRawJSON returns a vpn:// link whose payload is uncompressed JSON.
+// EncodeRawJSON возвращает vpn://, где после base64 лежит несжатый JSON.
+// DecodeURI принимает и этот вид, не только qCompress.
 func EncodeRawJSON(jsonBody []byte) string {
 	return "vpn://" + base64.RawURLEncoding.EncodeToString(jsonBody)
 }
@@ -98,6 +113,9 @@ func qCompress(data []byte) []byte {
 	return buf.Bytes()
 }
 
+// envelope — общий JSON и полной ссылки, и ответа API.
+// Туннель лежит в containers[].awg.last_config. Поля api_* без такого блока —
+// это ещё не туннель, а заявка на выдачу конфига.
 type envelope struct {
 	Containers       []container `json:"containers"`
 	DNS1             string      `json:"dns1"`
@@ -118,7 +136,10 @@ type awgBlock struct {
 	Port       any    `json:"port"`
 }
 
-// IsAPI reports whether the decoded JSON is an API link rather than a tunnel.
+// IsAPI отличает ссылку на API от уже готового туннеля.
+// Нужны непустые api_endpoint и api_key и ни одного контейнера с awg.last_config.
+// Если туннель уже вложен, поля API игнорируются: ходить за конфигом некуда и незачем.
+// Возвращаемые endpoint и key не логируются.
 func IsAPI(doc []byte) (endpoint, key string, ok bool) {
 	var env envelope
 	if err := json.Unmarshal(doc, &env); err != nil {
@@ -133,6 +154,8 @@ func IsAPI(doc []byte) (endpoint, key string, ok bool) {
 	return env.APIEndpoint, env.APIKey, true
 }
 
+// findAWG выбирает контейнер с last_config. Сначала точное имя defaultContainer,
+// иначе контейнер, в имени которого есть "awg", иначе первый подходящий.
 func findAWG(env envelope) (awgBlock, bool) {
 	var fallback awgBlock
 	found := false

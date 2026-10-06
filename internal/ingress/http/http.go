@@ -1,5 +1,5 @@
-// Package http is a localhost HTTP CONNECT ingress.
-// The host from the request is dialed unchanged.
+// Package http — локальный вход HTTP CONNECT.
+// Хост из запроса уходит в Dialer байт в байт, без резолва на этой машине.
 package http
 
 import (
@@ -24,13 +24,13 @@ func init() {
 	})
 }
 
-// Server accepts HTTP CONNECT and nothing else.
+// Server принимает только HTTP CONNECT. Прочий метод — 405, наружу ничего не звонит.
 type Server struct {
 	Addr string
 	Log  *slog.Logger
 }
 
-// New returns an HTTP CONNECT ingress.
+// New возвращает вход HTTP CONNECT на addr. Сокет откроет Serve, и только если addr — loopback.
 func New(addr string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -38,7 +38,7 @@ func New(addr string, log *slog.Logger) *Server {
 	return &Server{Addr: addr, Log: log}
 }
 
-// Serve accepts until ctx is cancelled and then closes both sides.
+// Serve принимает соединения, пока ctx не отменён, и затем закрывает обе стороны.
 func (s *Server) Serve(ctx context.Context, d dialer.Dialer) error {
 	ln, err := ingress.Listen(s.Addr)
 	if err != nil {
@@ -83,8 +83,10 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, d dialer.Dialer) {
 		_ = reject(conn, http.StatusMethodNotAllowed)
 		return
 	}
-	// CONNECT carries the authority in the request target. Pass those bytes
-	// through; do not prefer a Host header and do not resolve the name.
+	// CONNECT несёт authority в цели запроса: "example.com:443", не URL с путём.
+	// Эти байты уходят в Dialer как есть. Заголовок Host не предпочитается,
+	// имя на этой машине не резолвится. Дальше решает бэкенд: netstack AmneziaWG
+	// резолвит его DNS из ссылки, исходящий SOCKS5 отдаёт домен в CONNECT как имя.
 	addr := connectTarget(req)
 	if addr == "" {
 		_ = reject(conn, http.StatusBadRequest)
@@ -105,6 +107,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, d dialer.Dialer) {
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
 	}
+	// Клиент часто шлёт первые байты TLS сразу за CONNECT. Они уже лежат в буфере
+	// и должны уйти на ту сторону до копирования, иначе рукопожатие встанет.
 	if n := br.Buffered(); n > 0 {
 		peek, err := br.Peek(n)
 		if err != nil {
@@ -117,7 +121,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, d dialer.Dialer) {
 	pipe(ctx, conn, remote)
 }
 
-// connectTarget is the authority the client asked to dial, unchanged.
+// connectTarget — authority, которую просил клиент, без изменений.
+// Сначала цель запроса (RequestURI / URL.Host), и только если её нет — Host.
 func connectTarget(req *http.Request) string {
 	if req.RequestURI != "" && !strings.HasPrefix(req.RequestURI, "/") {
 		return req.RequestURI

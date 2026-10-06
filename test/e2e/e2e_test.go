@@ -1,5 +1,7 @@
 //go:build e2e
 
+// Package e2e_test поднимает два userspace-пира AmneziaWG и гоняет собранный
+// бинарник: failover, SIGHUP и выдачу конфига через API. Сборка с тегом e2e.
 package e2e_test
 
 import (
@@ -55,8 +57,8 @@ func TestE2EFailoverAndSignal(t *testing.T) {
 
 func TestE2EAPIConfig(t *testing.T) {
 	peer := startPeer(t, "peer-api")
-	// The direct client URI is replaced by an API that returns the same tunnel
-	// after it learns the posted public key.
+	// Прямая ссылка клиента заменяется API, который отдаёт тот же туннель,
+	// узнав присланный публичный ключ.
 	api := httptestAPI(t, peer)
 	bin := buildBinary(t)
 	socks, httpAddr := freeTCP(t), freeTCP(t)

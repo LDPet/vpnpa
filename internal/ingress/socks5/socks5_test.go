@@ -128,7 +128,7 @@ func TestUDPAssociateNotDialed(t *testing.T) {
 	if greet[0] != 0x05 || greet[1] != 0x00 {
 		t.Fatalf("greeting %v", greet)
 	}
-	// UDP ASSOCIATE, IPv4 0.0.0.0:0.
+	// UDP ASSOCIATE, IPv4 0.0.0.0:0. Команда не CONNECT, dial быть не должно.
 	if _, err := conn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		t.Fatal(err)
 	}

@@ -13,19 +13,25 @@ import (
 	"github.com/LDPet/vpnpa/internal/dialer"
 )
 
-// packetHexDump matches a space-separated hex dump of at least 8 bytes.
+// packetHexDump ловит дамп пакета из 8 и более байт в логе библиотеки.
+// Такие строки не пишем: в них полезная нагрузка пользователя.
 var packetHexDump = regexp.MustCompile(`(?:^|[^0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[ \t]+){7,}[0-9A-Fa-f]{2}(?:$|[^0-9A-Fa-f])`)
 
-// tunnelHandle is the live userspace tunnel.
+// tunnelHandle — живой userspace-туннель. dial ходит в netstack,
+// close гасит устройство. Таблицу маршрутов хоста это не касается.
 type tunnelHandle struct {
 	dial  dialer.Dialer
 	close func() error
 }
 
-// startTunnel brings up amneziawg-go inside the process. The host routing
-// table is not touched. Tests replace tunnelStarter.
+// startTunnel поднимает amneziawg-go внутри процесса. Таблица маршрутов
+// хоста не меняется. Тесты подменяют tunnelStarter, чтобы не открывать UDP.
 var tunnelStarter = startTunnel
 
+// startTunnel собирает TUN в памяти (gVisor netstack), а не /dev/net/tun.
+// Адреса и DNS берутся из ссылки: имена резолвит сам netstack, не резолвер хоста.
+// Затем NewDevice + IpcSet(UAPI) + Up. Сокет наружу — обычный UDP bind библиотеки,
+// без привилегий и без правил iptables.
 func startTunnel(t Tunnel, log *slog.Logger) (tunnelHandle, error) {
 	tunDev, tnet, err := netstack.CreateNetTUN(t.Addresses, t.DNS, t.MTU)
 	if err != nil {
@@ -47,6 +53,9 @@ func startTunnel(t Tunnel, log *slog.Logger) (tunnelHandle, error) {
 	return tunnelHandle{dial: tnet, close: func() error { dev.Close(); return nil }}, nil
 }
 
+// deviceLogger молчит, пока у slog не включён debug: тогда отбрасываются
+// и Verbosef, и Errorf. При включённом debug Verbosef пишется как Debug,
+// а Errorf — как Warn. Дампы пакетов отбрасываются в обоих каналах.
 func deviceLogger(log *slog.Logger) *device.Logger {
 	if log == nil || !log.Enabled(context.Background(), slog.LevelDebug) {
 		return &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf}
