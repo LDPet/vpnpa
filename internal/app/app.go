@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -53,8 +54,79 @@ type published struct {
 }
 
 type managed struct {
-	b   backend.Backend
+	tr  *tracked
 	uri string
+	typ string
+}
+
+// tracked is the object the balancer holds. The same pointer stays for an id
+// across reloads, so health and the current selection survive. Priority can
+// change in place. A new URI swaps the inner backend without Down/Up of an
+// unchanged one.
+type tracked struct {
+	id string
+
+	mu    sync.RWMutex
+	inner backend.Backend
+	prio  int
+}
+
+func newTracked(id string, prio int, inner backend.Backend) *tracked {
+	return &tracked{id: id, inner: inner, prio: prio}
+}
+
+func (t *tracked) ID() string { return t.id }
+
+func (t *tracked) Priority() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.prio
+}
+
+func (t *tracked) setPriority(p int) {
+	t.mu.Lock()
+	t.prio = p
+	t.mu.Unlock()
+}
+
+func (t *tracked) Up(ctx context.Context) error {
+	t.mu.RLock()
+	b := t.inner
+	t.mu.RUnlock()
+	return b.Up(ctx)
+}
+
+func (t *tracked) Down(ctx context.Context) error {
+	t.mu.RLock()
+	b := t.inner
+	t.mu.RUnlock()
+	return b.Down(ctx)
+}
+
+func (t *tracked) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	t.mu.RLock()
+	b := t.inner
+	t.mu.RUnlock()
+	return b.DialContext(ctx, network, address)
+}
+
+func (t *tracked) Endpoint() string {
+	t.mu.RLock()
+	b := t.inner
+	t.mu.RUnlock()
+	return backend.EndpointOf(b)
+}
+
+var _ backend.Backend = (*tracked)(nil)
+
+func (t *tracked) swap(ctx context.Context, next backend.Backend) {
+	t.mu.Lock()
+	old := t.inner
+	t.inner = next
+	t.mu.Unlock()
+	if old != nil && old != next {
+		_ = old.Down(ctx)
+	}
 }
 
 // New prepares an app. Call Run to start listeners.
@@ -86,12 +158,20 @@ func (a *App) Run(ctx context.Context) error {
 	a.mu.Unlock()
 
 	errCh := make(chan error, 3)
-	go func() { errCh <- a.serve(runCtx, "socks5", listen) }()
-	go func() { errCh <- a.serve(runCtx, "http", httpListen) }()
-	go func() {
+	var wg sync.WaitGroup
+	start := func(fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- fn()
+		}()
+	}
+	start(func() error { return a.serve(runCtx, "socks5", listen) })
+	start(func() error { return a.serve(runCtx, "http", httpListen) })
+	start(func() error {
 		a.balancer.Run(runCtx)
-		errCh <- nil
-	}()
+		return nil
+	})
 
 	sigCh := make(chan os.Signal, 1)
 	if a.opt.Signals {
@@ -110,12 +190,13 @@ func (a *App) Run(ctx context.Context) error {
 	)
 	a.logBackends()
 
+	var runErr error
+loop:
 	for {
 		select {
 		case <-ctx.Done():
-			cancel()
 			a.opt.Logger.Info("остановка")
-			return nil
+			break loop
 		case sig := <-sigCh:
 			switch sig {
 			case syscall.SIGHUP:
@@ -123,17 +204,22 @@ func (a *App) Run(ctx context.Context) error {
 					a.opt.Logger.Warn("ошибка перечитывания конфига", "err", err)
 				}
 			default:
-				cancel()
 				a.opt.Logger.Info("остановка")
-				return nil
+				break loop
 			}
 		case err := <-errCh:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				cancel()
-				return err
+			if err == nil || errors.Is(err, context.Canceled) {
+				if ctx.Err() != nil || runCtx.Err() != nil {
+					continue
+				}
 			}
+			runErr = err
+			break loop
 		}
 	}
+	cancel()
+	wg.Wait()
+	return runErr
 }
 
 func (a *App) boot(ctx context.Context) error {
@@ -206,20 +292,24 @@ func (a *App) Reload(ctx context.Context) error {
 }
 
 func (a *App) upAll(ctx context.Context, specs []config.Backend, prev map[string]*managed) ([]backend.Backend, error) {
-	var list []backend.Backend
-	next := map[string]*managed{}
+	type item struct {
+		spec  config.Backend
+		keep  *tracked
+		fresh backend.Backend
+	}
+	items := make([]item, 0, len(specs))
+	var fresh []backend.Backend
+	abort := func(err error) ([]backend.Backend, error) {
+		for _, b := range fresh {
+			_ = b.Down(ctx)
+		}
+		return nil, err
+	}
 	for _, spec := range specs {
 		if prev != nil {
-			if old, ok := prev[spec.ID]; ok && old.uri == spec.URI {
-				next[spec.ID] = old
-				list = append(list, old.b)
+			if old, ok := prev[spec.ID]; ok && old.uri == spec.URI && old.typ == spec.Type {
+				items = append(items, item{spec: spec, keep: old.tr})
 				continue
-			}
-		}
-		if prev != nil {
-			if old, ok := prev[spec.ID]; ok {
-				_ = old.b.Down(ctx)
-				delete(prev, spec.ID)
 			}
 		}
 		b, err := backend.New(backend.Config{
@@ -229,19 +319,43 @@ func (a *App) upAll(ctx context.Context, specs []config.Backend, prev map[string
 			URI:      spec.URI,
 		}, backend.Deps{Logger: a.opt.Logger, StateDir: a.opt.StateDir})
 		if err != nil {
-			return nil, fmt.Errorf("backend %s: %w", spec.ID, err)
+			return abort(fmt.Errorf("backend %s: %w", spec.ID, err))
 		}
 		if err := b.Up(ctx); err != nil {
 			a.opt.Logger.Warn("ошибка поднятия бэкенда", "backend", spec.ID, "err", err)
 		}
-		next[spec.ID] = &managed{b: b, uri: spec.URI}
-		list = append(list, b)
+		fresh = append(fresh, b)
+		items = append(items, item{spec: spec, fresh: b})
+	}
+
+	next := make(map[string]*managed, len(items))
+	list := make([]backend.Backend, 0, len(items))
+	for _, it := range items {
+		if it.keep != nil {
+			it.keep.setPriority(it.spec.Priority)
+			next[it.spec.ID] = &managed{tr: it.keep, uri: it.spec.URI, typ: it.spec.Type}
+			list = append(list, it.keep)
+			continue
+		}
+		var tr *tracked
+		if prev != nil {
+			if old, ok := prev[it.spec.ID]; ok {
+				tr = old.tr
+				tr.setPriority(it.spec.Priority)
+				tr.swap(ctx, it.fresh)
+			}
+		}
+		if tr == nil {
+			tr = newTracked(it.spec.ID, it.spec.Priority, it.fresh)
+		}
+		next[it.spec.ID] = &managed{tr: tr, uri: it.spec.URI, typ: it.spec.Type}
+		list = append(list, tr)
 	}
 	if prev == nil {
 		a.managed = next
 	} else {
 		for id, m := range next {
-			a.managed[id] = m
+			prev[id] = m
 		}
 	}
 	return list, nil
@@ -256,7 +370,7 @@ func (a *App) dropMissing(ctx context.Context, specs []config.Backend) {
 		if _, ok := keep[id]; ok {
 			continue
 		}
-		_ = m.b.Down(ctx)
+		_ = m.tr.Down(ctx)
 		delete(a.managed, id)
 	}
 }
@@ -266,7 +380,7 @@ func (a *App) shutdown() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, m := range a.managed {
-		_ = m.b.Down(ctx)
+		_ = m.tr.Down(ctx)
 	}
 }
 
@@ -293,7 +407,7 @@ func (a *App) writeStatus(st sticky.Status) {
 	}
 	raw = append(raw, '\n')
 	path := filepath.Join(a.opt.StateDir, "status.json")
-	if err := atomicfile.Write(path, raw, 0o644); err != nil {
+	if err := atomicfile.Write(path, raw, 0o600); err != nil {
 		a.opt.Logger.Warn("не записан status", "err", err)
 	}
 }

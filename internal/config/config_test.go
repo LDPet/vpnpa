@@ -34,6 +34,31 @@ func TestParseDefaultsAndRejects(t *testing.T) {
 	if _, err := Parse([]byte("listen: 1.2.3.4:1080\n")); err == nil {
 		t.Fatal("non-loopback listen was accepted")
 	}
+	if _, err := Parse([]byte("listen: 127.0.0.1:1080\nhttp_listen: 8.8.8.8:8080\n")); err == nil {
+		t.Fatal("non-loopback http_listen was accepted")
+	}
+	if _, err := Parse([]byte("listen: 127.0.0.1:1080\nhttp_listen: 127.0.0.1:1080\n")); err == nil {
+		t.Fatal("identical listeners were accepted")
+	}
+	if _, err := Parse([]byte("listen: localhost:1080\n")); err == nil {
+		t.Fatal("hostname listen was accepted")
+	}
+	v6, err := Parse([]byte("listen: \"[::1]:1080\"\nhttp_listen: \"[::1]:8080\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v6.Listen != "[::1]:1080" || v6.HTTPListen != "[::1]:8080" {
+		t.Fatalf("ipv6 listeners %+v", v6)
+	}
+	if _, err := Parse([]byte("listen: 127.0.0.1:1080\nbackends:\n  - id: a\n    type: amneziawg\n    uri: socks5://127.0.0.1:1\n")); err == nil {
+		t.Fatal("amneziawg accepted socks5 uri")
+	}
+	if _, err := Parse([]byte("listen: 127.0.0.1:1080\nbackends:\n  - id: a\n    type: socks5\n    uri: vpn://abc\n")); err == nil {
+		t.Fatal("socks5 accepted vpn uri")
+	}
+	if _, err := Parse([]byte("listen: 127.0.0.1:1080\nbackends:\n  - id: a\n    type: socks5\n    uri: socks5://127.0.0.1\n")); err == nil {
+		t.Fatal("socks5 uri without port was accepted")
+	}
 	custom, err := Parse([]byte("listen: 127.0.0.1:1080\nbalancer:\n  type: sticky\n  check_urls:\n    - tcp://127.0.0.1:9\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -121,5 +146,51 @@ func TestAddSchemesAndMode(t *testing.T) {
 	}
 	if len(f.Backends) != 2 {
 		t.Fatalf("%d backends", len(f.Backends))
+	}
+}
+
+func TestDefaultIDsPrioritiesAndEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if _, err := InstallConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddSOCKS5(path, "", "socks5://user:s3cret@127.0.0.1"); err == nil || strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "socks5://user") {
+		t.Fatalf("missing port: %v", err)
+	}
+	first, err := Add(path, "", "vpn://one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Add(path, "", "vpn://two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != "vpn-1" || first.Priority != 100 {
+		t.Fatalf("first %+v", first)
+	}
+	if second.ID != "vpn-2" || second.Priority != 90 {
+		t.Fatalf("second id=%s priority=%d type=%s", second.ID, second.Priority, second.Type)
+	}
+	third, err := AddSOCKS5(path, "", "socks5://user:s3cret@127.0.0.1:9050")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.ID != "vpn-3" || third.Priority != 80 || third.Type != "socks5" {
+		t.Fatalf("third id=%s priority=%d type=%s", third.ID, third.Priority, third.Type)
+	}
+	ep, err := SOCKS5Endpoint(third.URI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep != "127.0.0.1:9050" || strings.Contains(ep, "s3cret") {
+		t.Fatalf("endpoint %q", ep)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %o", st.Mode().Perm())
 	}
 }

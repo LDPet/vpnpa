@@ -19,4 +19,19 @@ func TestTextRunsForeground(t *testing.T) {
 	if strings.Contains(text, "Type=forking") {
 		t.Fatal("unit forks")
 	}
+	if strings.Contains(text, "User=root") || strings.Contains(text, "sudo") {
+		t.Fatalf("unit runs as root:\n%s", text)
+	}
+	spaced := Text("/home/user name/.local/bin/vpnpa", "/home/user name/.config/vpnpa/config.yaml", "/home/user name/.local/state/vpnpa")
+	want := `ExecStart="/home/user name/.local/bin/vpnpa" run --config "/home/user name/.config/vpnpa/config.yaml" --state-dir "/home/user name/.local/state/vpnpa"`
+	if !strings.Contains(spaced, want) {
+		t.Fatalf("unquoted path would split:\n%s", spaced)
+	}
+	percent := Text("/home/user/%h/vpnpa", "/home/user/%h/config.yaml", "/home/user/%h/state")
+	if strings.Contains(percent, "%h") && !strings.Contains(percent, "%%h") {
+		t.Fatalf("systemd would expand %%h:\n%s", percent)
+	}
+	if !strings.Contains(percent, "/home/user/%%h/vpnpa") {
+		t.Fatalf("percent not escaped:\n%s", percent)
+	}
 }

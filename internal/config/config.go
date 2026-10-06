@@ -219,6 +219,19 @@ func (f File) Validate() error {
 		if strings.TrimSpace(b.URI) == "" {
 			return fmt.Errorf("backends[%d]: uri is required", i)
 		}
+		switch b.Type {
+		case "amneziawg":
+			if !strings.HasPrefix(strings.TrimSpace(b.URI), "vpn://") {
+				return fmt.Errorf("backends[%d]: amneziawg uri must start with vpn://", i)
+			}
+		case "socks5":
+			if _, err := ParseSOCKS5URI(b.URI); err != nil {
+				return fmt.Errorf("backends[%d]: socks5 uri must be socks5://host:port", i)
+			}
+		}
+	}
+	if f.Listen == f.HTTPListen {
+		return fmt.Errorf("listen and http_listen must differ")
 	}
 	return nil
 }

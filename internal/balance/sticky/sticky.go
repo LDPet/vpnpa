@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,9 @@ type health struct {
 	okStreak    int
 	failStreak  int
 	nextRestart time.Time
+	// restarting is set while Down/Up of a non-current backend is in progress
+	// so a probe cannot select that backend and then close it.
+	restarting bool
 }
 
 type currentBox struct {
@@ -104,6 +108,10 @@ func New(backends []backend.Backend, opt Options) *Sticky {
 	if opt.RestartInterval <= 0 {
 		opt.RestartInterval = 5 * time.Minute
 	}
+	// Copy so a later mutation of the caller's slice cannot race with probes.
+	// An empty list is the default pair: check_urls replaces the list only
+	// when the caller actually provides URLs.
+	opt.CheckURLs = append([]string(nil), opt.CheckURLs...)
 	if len(opt.CheckURLs) == 0 {
 		opt.CheckURLs = []string{
 			"https://www.gstatic.com/generate_204",
@@ -171,22 +179,32 @@ func (s *Sticky) setBackendsLocked(list []backend.Backend) {
 		order = append(order, b)
 		old, ok := s.byID[b.ID()]
 		if !ok || old != b {
-			s.health[b.ID()] = &health{}
+			// A replaced instance keeps "alive" so the current id stays
+			// selected, but streaks start over: it is a new tunnel.
+			keep := false
+			if ok {
+				if h := s.health[b.ID()]; h != nil {
+					keep = h.alive
+				}
+			}
+			s.health[b.ID()] = &health{alive: keep}
 		}
 	}
-	for id := range s.byID {
+	for id := range s.health {
 		if _, ok := next[id]; !ok {
 			delete(s.health, id)
 		}
 	}
 	if s.current != nil {
-		if _, ok := next[s.current.ID()]; !ok {
+		if b, ok := next[s.current.ID()]; ok {
+			s.current = b
+		} else {
 			s.current = nil
-			s.ptr.Store(nil)
 		}
 	}
 	s.byID = next
 	s.order = order
+	s.publishLocked(s.current)
 }
 
 // DialContext sends the connection to the current backend only.
@@ -206,7 +224,7 @@ func (s *Sticky) DialContext(ctx context.Context, network, address string) (net.
 			"backend", b.ID(),
 			"addr", address,
 			"duration", time.Since(start),
-			"err", err,
+			"err", safeErr(err),
 		)
 		s.requestProbe()
 		return nil, fmt.Errorf("backend %s: %w", b.ID(), err)
@@ -265,6 +283,9 @@ type probeResult struct {
 }
 
 func (s *Sticky) cycle(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	backends := s.backendSnapshot()
 	results := make([]probeResult, len(backends))
 	var wg sync.WaitGroup
@@ -278,6 +299,11 @@ func (s *Sticky) cycle(ctx context.Context) {
 		}(i, b)
 	}
 	wg.Wait()
+	// A cancelled run must not record timeouts as real failures: that would
+	// restart tunnels while the process is stopping.
+	if ctx.Err() != nil {
+		return
+	}
 	s.apply(ctx, results)
 }
 
@@ -297,6 +323,11 @@ func (s *Sticky) apply(ctx context.Context, results []probeResult) {
 	}
 	var jobs []job
 	for _, r := range results {
+		// A probe started before SetBackends belongs to the old instance.
+		// Applying it would mark the replacement unhealthy or Up the removed tunnel.
+		if cur, ok := s.byID[r.b.ID()]; !ok || cur != r.b {
+			continue
+		}
 		h := s.health[r.b.ID()]
 		if h == nil {
 			h = &health{}
@@ -317,14 +348,14 @@ func (s *Sticky) apply(ctx context.Context, results []probeResult) {
 		}
 		if becameDead {
 			s.opt.Logger.Info("бэкенд нежив", "backend", r.b.ID(), "priority", r.b.Priority())
-			isCurrent := s.current != nil && s.current.ID() == r.b.ID()
+			isCurrent := isCurrentID(s.current, r.b.ID())
 			// The current backend is not closed by a probe. restart_interval
 			// applies only after it is no longer current.
 			h.nextRestart = s.now().Add(s.opt.RestartInterval)
-			if !isCurrent {
+			if !isCurrent && !h.restarting {
 				jobs = append(jobs, job{b: r.b})
 			}
-		} else if !h.alive && h.failStreak >= s.opt.FailThreshold && !isCurrentID(s.current, r.b.ID()) && (h.nextRestart.IsZero() || s.restartDue(h.nextRestart)) {
+		} else if s.restartWantedLocked(h, r.b.ID()) {
 			h.nextRestart = s.now().Add(s.opt.RestartInterval)
 			jobs = append(jobs, job{b: r.b})
 		}
@@ -350,6 +381,18 @@ func (s *Sticky) restartDue(t time.Time) bool {
 	return !t.IsZero() && !s.now().Before(t)
 }
 
+// restartWantedLocked reports whether a non-current unhealthy backend is due
+// for its single Down+Up. The current backend is never included.
+func (s *Sticky) restartWantedLocked(h *health, id string) bool {
+	if h == nil || h.alive || h.restarting || isCurrentID(s.current, id) {
+		return false
+	}
+	if h.failStreak < s.opt.FailThreshold {
+		return false
+	}
+	return h.nextRestart.IsZero() || s.restartDue(h.nextRestart)
+}
+
 // ProbeNow runs a single probe cycle. The background Run loop is not required.
 func (s *Sticky) ProbeNow(ctx context.Context) {
 	s.cycle(ctx)
@@ -373,30 +416,98 @@ func (s *Sticky) logProbe(r probeResult, h *health) {
 }
 
 func (s *Sticky) restart(ctx context.Context, b backend.Backend) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	h := s.health[b.ID()]
+	if !s.sameInstanceLocked(b) || h == nil || h.restarting || isCurrentID(s.current, b.ID()) {
+		s.mu.Unlock()
+		return
+	}
+	h.restarting = true
+	// Reserve the interval before Down so a concurrent cycle cannot queue
+	// another restart of the same backend.
+	if h.nextRestart.IsZero() || s.restartDue(h.nextRestart) {
+		h.nextRestart = s.now().Add(s.opt.RestartInterval)
+	}
+	s.mu.Unlock()
+
+	// finished is set once this call has cleared the flag itself. The defer
+	// covers every earlier return and must not clear a newer restart.
+	finished := false
+	defer func() {
+		if finished {
+			return
+		}
+		s.mu.Lock()
+		if s.health[b.ID()] == h {
+			h.restarting = false
+		}
+		s.mu.Unlock()
+	}()
+
 	s.opt.Logger.Info("переподъём бэкенда", "backend", b.ID())
 	if err := b.Down(ctx); err != nil {
-		s.opt.Logger.Warn("ошибка остановки бэкенда", "backend", b.ID(), "err", err)
+		s.opt.Logger.Warn("ошибка остановки бэкенда", "backend", b.ID(), "err", safeErr(err))
+	}
+	// The instance may have been replaced while Down ran. Up of the removed
+	// tunnel would bring back a device the process already dropped.
+	s.mu.Lock()
+	same := s.sameInstanceLocked(b)
+	s.mu.Unlock()
+	if !same {
+		return
 	}
 	if err := b.Up(ctx); err != nil {
-		s.opt.Logger.Warn("ошибка поднятия бэкенда", "backend", b.ID(), "err", err)
+		s.opt.Logger.Warn("ошибка поднятия бэкенда", "backend", b.ID(), "err", safeErr(err))
+	}
+	// Up can block on the network. Reload may have swapped the instance
+	// while it ran; the old device must not stay up beside the new one.
+	s.mu.Lock()
+	same = s.sameInstanceLocked(b)
+	s.mu.Unlock()
+	if !same {
+		if err := b.Down(ctx); err != nil {
+			s.opt.Logger.Warn("ошибка остановки бэкенда", "backend", b.ID(), "err", safeErr(err))
+		}
+		return
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	start := time.Now()
 	ok := s.probe(ctx, b)
+	if ctx.Err() != nil {
+		return
+	}
 	s.mu.Lock()
-	h := s.health[b.ID()]
-	if h == nil {
-		h = &health{}
-		s.health[b.ID()] = h
+	if !s.sameInstanceLocked(b) || s.health[b.ID()] != h {
+		s.mu.Unlock()
+		if err := b.Down(ctx); err != nil {
+			s.opt.Logger.Warn("ошибка остановки бэкенда", "backend", b.ID(), "err", safeErr(err))
+		}
+		return
 	}
 	_, becameAlive := h.observe(ok, s.opt.FailThreshold, s.opt.RecoverThreshold)
 	if becameAlive {
 		s.opt.Logger.Info("бэкенд жив", "backend", b.ID(), "priority", b.Priority())
 	}
 	s.logProbe(probeResult{b: b, ok: ok, latency: time.Since(start)}, h)
-	s.reselectLocked("restart")
+	// Clear the flag before reselect so a recovered backend can be chosen
+	// when nothing else is alive. It was not current, so this cannot close
+	// the tunnel that was serving user traffic.
+	h.restarting = false
+	finished = true
+	s.reselectLocked("probe")
 	st := s.snapshotLocked()
 	s.mu.Unlock()
 	s.emit(st)
+}
+
+func (s *Sticky) sameInstanceLocked(b backend.Backend) bool {
+	cur, ok := s.byID[b.ID()]
+	return ok && cur == b
 }
 
 func (s *Sticky) probeCurrent(ctx context.Context) {
@@ -408,6 +519,9 @@ func (s *Sticky) probeCurrent(ctx context.Context) {
 	}
 	start := time.Now()
 	ok := s.probe(ctx, b)
+	if ctx.Err() != nil {
+		return
+	}
 	s.apply(ctx, []probeResult{{b: b, ok: ok, latency: time.Since(start)}})
 }
 
@@ -419,21 +533,24 @@ func (s *Sticky) reselectLocked(why string) {
 	var next backend.Backend
 	reason := ""
 	if prefer != "auto" {
-		if b, ok := s.byID[prefer]; ok && s.aliveLocked(prefer) {
+		if b, ok := s.byID[prefer]; ok && s.selectableLocked(prefer) {
 			next = b
 			if s.current == nil || s.current.ID() != prefer {
 				reason = "prefer"
 			}
 		}
 	}
-	if next == nil && s.current != nil && s.aliveLocked(s.current.ID()) {
+	if next == nil && s.current != nil && s.selectableLocked(s.current.ID()) {
 		next = s.current
 	}
 	if next == nil {
-		next = s.highestAliveLocked()
+		next = s.highestSelectableLocked()
 		if next != nil && (s.current == nil || s.current.ID() != next.ID()) && reason == "" {
 			reason = why
 		}
+	}
+	if idOf(s.current) == "" && next != nil && reason != "prefer" {
+		reason = "start"
 	}
 	s.assignLocked(next, reason)
 }
@@ -441,36 +558,46 @@ func (s *Sticky) reselectLocked(why string) {
 func (s *Sticky) assignLocked(next backend.Backend, reason string) {
 	from := idOf(s.current)
 	to := idOf(next)
+	s.current = next
+	// Always publish the concrete value. Same id can be a new instance;
+	// DialContext reads this pointer, not s.current.
+	s.publishLocked(next)
 	if from == to {
-		s.current = next
-		if next == nil {
-			s.ptr.Store(nil)
-		}
 		return
 	}
-	s.current = next
 	if next == nil {
-		s.ptr.Store(nil)
 		s.opt.Logger.Info("переключение", "from", from, "to", "", "reason", reason)
 		s.opt.Logger.Warn("нет живых бэкендов")
 		return
 	}
-	s.ptr.Store(&currentBox{b: next})
 	if reason == "" {
 		reason = "start"
 	}
 	s.opt.Logger.Info("переключение", "from", from, "to", to, "reason", reason)
 }
 
-func (s *Sticky) aliveLocked(id string) bool {
-	h := s.health[id]
-	return h != nil && h.alive
+func (s *Sticky) publishLocked(next backend.Backend) {
+	if next == nil {
+		s.ptr.Store(nil)
+		return
+	}
+	if box := s.ptr.Load(); box != nil && box.b == next {
+		return
+	}
+	s.ptr.Store(&currentBox{b: next})
 }
 
-func (s *Sticky) highestAliveLocked() backend.Backend {
+func (s *Sticky) selectableLocked(id string) bool {
+	h := s.health[id]
+	// restarting backends are mid Down/Up. Selecting one would point new
+	// dials at a device the probe is about to close.
+	return h != nil && h.alive && !h.restarting
+}
+
+func (s *Sticky) highestSelectableLocked() backend.Backend {
 	var best backend.Backend
 	for _, b := range s.order {
-		if !s.aliveLocked(b.ID()) {
+		if !s.selectableLocked(b.ID()) {
 			continue
 		}
 		if best == nil || b.Priority() > best.Priority() {
@@ -570,10 +697,16 @@ func (s *Sticky) refreshEgress(ctx context.Context) {
 	defer cancel()
 	ip, err := fetchEgress(ctx, b, s.opt.EgressURL)
 	if err != nil {
-		s.opt.Logger.Debug("внешний IP недоступен", "backend", b.ID(), "err", err)
+		s.opt.Logger.Debug("внешний IP недоступен", "backend", b.ID(), "err", safeErr(err))
 		return
 	}
 	s.mu.Lock()
+	// The fetch used a sampled backend. If it is no longer current, keep the
+	// previous IP instead of publishing an address from the wrong tunnel.
+	if !isCurrentID(s.current, b.ID()) || (s.current != nil && s.current != b) {
+		s.mu.Unlock()
+		return
+	}
 	changed := s.egress != ip
 	s.egress = ip
 	st := s.snapshotLocked()
@@ -641,4 +774,20 @@ func idOf(b backend.Backend) string {
 		return ""
 	}
 	return b.ID()
+}
+
+var (
+	vpnURI  = regexp.MustCompile(`vpn://\S+`)
+	urlUser = regexp.MustCompile(`://[^/\s@]+@`)
+)
+
+// safeErr is a log string with vpn:// URIs and URL userinfo removed.
+func safeErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	s = vpnURI.ReplaceAllString(s, "[redacted-uri]")
+	s = urlUser.ReplaceAllString(s, "://REDACTED@")
+	return s
 }

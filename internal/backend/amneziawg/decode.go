@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,19 +53,25 @@ func tryQCompress(raw []byte) ([]byte, bool) {
 	if len(raw) < 5 {
 		return nil, false
 	}
+	// Qt qCompress: 4-byte big-endian uncompressed length, then a zlib stream.
+	n := int(binary.BigEndian.Uint32(raw[:4]))
+	if n <= 0 || n > maxConfigBytes {
+		return nil, false
+	}
 	zr, err := zlib.NewReader(bytes.NewReader(raw[4:]))
 	if err != nil {
 		return nil, false
 	}
 	defer func() { _ = zr.Close() }()
-	out, err := io.ReadAll(io.LimitReader(zr, maxConfigBytes))
-	if err != nil {
+	out, err := io.ReadAll(io.LimitReader(zr, int64(n)+1))
+	if err != nil || len(out) != n {
 		return nil, false
 	}
-	if len(out) == 0 || (out[0] != '{' && out[0] != '[') {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
 		return nil, false
 	}
-	return out, true
+	return trimmed, true
 }
 
 // EncodeURI qCompresses jsonBody and returns a vpn:// link.

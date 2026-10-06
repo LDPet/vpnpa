@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/LDPet/vpnpa/internal/dialer"
 )
+
+// packetHexDump matches a space-separated hex dump of at least 8 bytes.
+var packetHexDump = regexp.MustCompile(`(?:^|[^0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[ \t]+){7,}[0-9A-Fa-f]{2}(?:$|[^0-9A-Fa-f])`)
 
 // tunnelHandle is the live userspace tunnel.
 type tunnelHandle struct {
@@ -29,7 +33,9 @@ func startTunnel(t Tunnel, log *slog.Logger) (tunnelHandle, error) {
 	}
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), deviceLogger(log))
 	uapi := BuildUAPI(t)
-	log.Debug("uapi", "config", RedactUAPI(uapi))
+	if log != nil {
+		log.Debug("uapi", "config", RedactUAPI(uapi))
+	}
 	if err := dev.IpcSet(uapi); err != nil {
 		dev.Close()
 		return tunnelHandle{}, fmt.Errorf("ipc set: %w", err)
@@ -45,12 +51,37 @@ func deviceLogger(log *slog.Logger) *device.Logger {
 	if log == nil || !log.Enabled(context.Background(), slog.LevelDebug) {
 		return &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf}
 	}
-	return &device.Logger{
-		Verbosef: func(format string, args ...any) {
-			log.Debug(fmt.Sprintf(format, args...))
-		},
-		Errorf: func(format string, args ...any) {
-			log.Warn(fmt.Sprintf(format, args...))
-		},
+	write := func(level slog.Level) func(string, ...any) {
+		return func(format string, args ...any) {
+			if dumpsPacket(args) {
+				return
+			}
+			msg := fmt.Sprintf(format, args...)
+			if packetHexDump.MatchString(msg) {
+				return
+			}
+			if level == slog.LevelDebug {
+				log.Debug(msg)
+				return
+			}
+			log.Warn(msg)
+		}
 	}
+	return &device.Logger{Verbosef: write(slog.LevelDebug), Errorf: write(slog.LevelWarn)}
+}
+
+func dumpsPacket(args []any) bool {
+	for _, a := range args {
+		switch v := a.(type) {
+		case []byte:
+			if len(v) > 0 {
+				return true
+			}
+		case string:
+			if packetHexDump.MatchString(v) {
+				return true
+			}
+		}
+	}
+	return false
 }

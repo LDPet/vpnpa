@@ -41,7 +41,7 @@ func TestHostnameForwarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := io.WriteString(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"); err != nil {
+	if _, err := io.WriteString(conn, "CONNECT ExAmPle.COM:443 HTTP/1.1\r\nHost: other.example:9\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
 	br := bufio.NewReader(conn)
@@ -52,7 +52,7 @@ func TestHostnameForwarded(t *testing.T) {
 	if line != "HTTP/1.1 200 Connection Established\r\n" {
 		t.Fatalf("status %q", line)
 	}
-	if d.addr != "example.com:443" {
+	if d.addr != "ExAmPle.COM:443" {
 		t.Fatalf("dialed %q", d.addr)
 	}
 	for {
@@ -121,6 +121,72 @@ func TestContextClosesBothSides(t *testing.T) {
 	_ = d.remote.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := d.remote.Read(buf); err == nil {
 		t.Fatal("remote still open")
+	}
+}
+
+func TestGETDoesNotDial(t *testing.T) {
+	addr := freeAddr(t)
+	d := &recDial{}
+	srv := New(addr, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx, d) }()
+	waitListen(t, addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "HTTP/1.1 405 Method Not Allowed\r\n" {
+		t.Fatalf("status %q", line)
+	}
+	if d.addr != "" {
+		t.Fatalf("dialed %q", d.addr)
+	}
+}
+
+func TestCancelUnblocksIdleConn(t *testing.T) {
+	addr := freeAddr(t)
+	srv := New(addr, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, &recDial{}) }()
+	waitListen(t, addr)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve blocked on an idle connection")
+	}
+}
+
+func TestRejectsNonLoopback(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:0", "8.8.8.8:8080", ":8080", "localhost:8080"} {
+		t.Run(addr, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := New(addr, slog.New(slog.DiscardHandler)).Serve(ctx, &recDial{})
+			if err == nil {
+				t.Fatal("non-loopback listen was accepted")
+			}
+		})
 	}
 }
 

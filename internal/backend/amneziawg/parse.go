@@ -87,7 +87,7 @@ func ParseFullConfig(doc []byte, privateKey string) (Tunnel, error) {
 	}
 
 	var t Tunnel
-	addrText := fields.get("address")
+	addrText := joinAll(fields.getAll("address"))
 	if addrText == "" {
 		addrText = stringField(last, "client_ip")
 	}
@@ -100,7 +100,7 @@ func ParseFullConfig(doc []byte, privateKey string) (Tunnel, error) {
 		return Tunnel{}, fmt.Errorf("config: address is empty")
 	}
 
-	dnsText := fields.get("dns")
+	dnsText := joinAll(fields.getAll("dns"))
 	if dnsText == "" {
 		dnsText = joinComma(dns1, dns2)
 	}
@@ -138,13 +138,14 @@ func ParseFullConfig(doc []byte, privateKey string) (Tunnel, error) {
 	if err != nil {
 		return Tunnel{}, fmt.Errorf("public key: %w", err)
 	}
-	if psk := firstString(fields.get("presharedkey"), stringField(last, "psk_key")); psk != "" {
+	if psk := firstString(fields.get("presharedkey"), stringField(last, "psk_key"), stringField(last, "presharedkey")); psk != "" {
 		t.PresharedHex, err = keyToHex(psk)
 		if err != nil {
 			return Tunnel{}, fmt.Errorf("preshared key: %w", err)
 		}
 	}
-	if hpk := fields.get("headerprotectionkey"); hpk != "" {
+	// The conf text often omits AWG 3.1 fields; vpn:// keeps them on last_config.
+	if hpk := firstString(fields.get("headerprotectionkey"), stringField(last, "headerprotectionkey")); hpk != "" {
 		t.HeaderProtectionKeyHex, err = keyToHex(hpk)
 		if err != nil {
 			return Tunnel{}, fmt.Errorf("header protection key: %w", err)
@@ -163,12 +164,13 @@ func ParseFullConfig(doc []byte, privateKey string) (Tunnel, error) {
 		return Tunnel{}, fmt.Errorf("config: endpoint is empty")
 	}
 
-	if ips := fields.getAll("allowedips"); len(ips) > 0 {
-		for _, item := range ips {
-			t.AllowedIPs = append(t.AllowedIPs, splitList(item)...)
+	for _, item := range fields.getAll("allowedips") {
+		t.AllowedIPs = append(t.AllowedIPs, splitList(item)...)
+	}
+	if len(t.AllowedIPs) == 0 {
+		if raw, ok := last["allowed_ips"]; ok {
+			t.AllowedIPs = stringList(raw)
 		}
-	} else if raw, ok := last["allowed_ips"]; ok {
-		t.AllowedIPs = stringList(raw)
 	}
 	if len(t.AllowedIPs) == 0 {
 		t.AllowedIPs = []string{"0.0.0.0/0"}
@@ -391,6 +393,14 @@ func firstString(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func joinAll(vals []string) string {
+	var parts []string
+	for _, v := range vals {
+		parts = append(parts, splitList(v)...)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func joinComma(a, b string) string {

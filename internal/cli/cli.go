@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -106,7 +107,7 @@ func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, logx.Redact(err.Error()))
 		return 1
 	}
 	return 0
@@ -114,8 +115,11 @@ func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 
 func layoutFrom(configPath, stateDir string) (paths.Layout, error) {
 	layout, err := paths.Default()
-	if err != nil && configPath == "" {
-		return paths.Layout{}, err
+	if err != nil {
+		if configPath == "" || stateDir == "" {
+			return paths.Layout{}, err
+		}
+		layout = paths.Layout{}
 	}
 	if configPath != "" {
 		layout.ConfigPath = configPath
@@ -123,17 +127,29 @@ func layoutFrom(configPath, stateDir string) (paths.Layout, error) {
 	if stateDir != "" {
 		layout.StateDir = stateDir
 	}
+	if layout.ConfigPath == "" || layout.StateDir == "" {
+		return paths.Layout{}, fmt.Errorf("не заданы пути конфигурации и состояния")
+	}
 	return layout, nil
 }
 
 func cmdInstall(ctx context.Context, layout paths.Layout, run Runner, stderr io.Writer) error {
-	if err := os.MkdirAll(layout.StateDir, 0o700); err != nil {
+	if layout.UnitPath == "" || layout.BinPath == "" {
+		return fmt.Errorf("не удалось определить путь unit или бинарника")
+	}
+	if err := ensurePrivateDir(layout.StateDir); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(layout.KeysDir(), 0o700); err != nil {
+	if err := ensurePrivateDir(layout.KeysDir()); err != nil {
 		return err
 	}
 	if _, err := config.InstallConfig(layout.ConfigPath); err != nil {
+		return err
+	}
+	if err := ensurePrivateDir(filepath.Dir(layout.ConfigPath)); err != nil {
+		return err
+	}
+	if err := os.Chmod(layout.ConfigPath, 0o600); err != nil {
 		return err
 	}
 	text := unitfile.Text(layout.BinPath, layout.ConfigPath, layout.StateDir)
@@ -171,6 +187,12 @@ func cmdAdd(ctx context.Context, layout paths.Layout, run Runner, socks bool, ar
 	if err != nil {
 		return err
 	}
+	if err := os.Chmod(layout.ConfigPath, 0o600); err != nil {
+		return err
+	}
+	if err := ensurePrivateDir(filepath.Dir(layout.ConfigPath)); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(stderr, "добавлен %s type=%s priority=%d\n", b.ID, b.Type, b.Priority)
 	signalReload(ctx, run)
 	return nil
@@ -192,7 +214,7 @@ func cmdList(layout paths.Layout, stdout io.Writer) error {
 				line += "\t" + ep
 			}
 		}
-		_, _ = fmt.Fprintln(stdout, line)
+		_, _ = fmt.Fprintln(stdout, logx.Redact(line))
 	}
 	return nil
 }
@@ -202,6 +224,9 @@ func cmdPrefer(layout paths.Layout, args []string) error {
 		return fmt.Errorf("использование: vpnpa prefer <id>|auto")
 	}
 	choice := args[0]
+	if err := ensurePrivateDir(layout.StateDir); err != nil {
+		return err
+	}
 	if choice != "auto" {
 		f, err := config.Load(layout.ConfigPath)
 		if err != nil {
@@ -217,9 +242,6 @@ func cmdPrefer(layout paths.Layout, args []string) error {
 		if !found {
 			return fmt.Errorf("нет бэкенда %q", choice)
 		}
-	}
-	if err := os.MkdirAll(layout.StateDir, 0o700); err != nil {
-		return err
 	}
 	return atomicfile.Write(layout.PreferPath(), []byte(choice+"\n"), 0o600)
 }
@@ -279,7 +301,7 @@ func cmdUp(ctx context.Context, layout paths.Layout, run Runner, stdout io.Write
 	if st, err := os.ReadFile(layout.StatusPath()); err == nil { // #nosec G304 -- путь status.json задаёт раскладка
 		text := string(st)
 		if i := strings.Index(text, `"current"`); i >= 0 {
-			_, _ = fmt.Fprintln(stdout, strings.TrimSpace(text))
+			_, _ = fmt.Fprintln(stdout, strings.TrimSpace(logx.Redact(text)))
 		}
 	}
 	return nil
@@ -293,7 +315,7 @@ func cmdStatus(layout paths.Layout, stdout io.Writer) error {
 		}
 		return err
 	}
-	_, _ = fmt.Fprint(stdout, string(raw))
+	_, _ = fmt.Fprint(stdout, logx.Redact(string(raw)))
 	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
 		_, _ = fmt.Fprintln(stdout)
 	}
@@ -303,8 +325,11 @@ func cmdStatus(layout paths.Layout, stdout io.Writer) error {
 func cmdLogs(ctx context.Context, run Runner, args []string) error {
 	follow := false
 	for _, a := range args {
-		if a == "-f" || a == "--follow" {
+		switch a {
+		case "-f", "--follow":
 			follow = true
+		default:
+			return fmt.Errorf("vpnpa logs принимает только -f")
 		}
 	}
 	journal := []string{"--user", "-u", "vpnpa.service", "-n", "100", "--no-pager"}
@@ -323,27 +348,101 @@ func cmdEnable(ctx context.Context, run Runner, stdout io.Writer) error {
 	return nil
 }
 
+// killProc and the /proc readers are replaced in tests.
+var (
+	killProc    = syscall.Kill
+	procExe     = func(pid int) (string, error) { return os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)) }
+	procCmdline = func(pid int) ([]byte, error) {
+		return os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)) // #nosec G304 -- pid is the numeric MainPID from systemctl
+	}
+)
+
 func signalReload(ctx context.Context, run Runner) {
 	out, err := run.Output(ctx, "systemctl", "--user", "show", "-p", "MainPID", "--value", "vpnpa.service")
 	if err != nil {
 		return
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || pid <= 0 {
+	if err != nil || pid <= 1 {
 		return
 	}
-	_ = syscall.Kill(pid, syscall.SIGHUP)
+	if !isVpnpaRun(pid) {
+		return
+	}
+	_ = killProc(pid, syscall.SIGHUP)
+}
+
+// isVpnpaRun reports whether pid is the vpnpa daemon (argv contains "run"),
+// not a recycled PID or another command of the same binary.
+func isVpnpaRun(pid int) bool {
+	exe, err := procExe(pid)
+	if err != nil {
+		return false
+	}
+	exe = strings.TrimSuffix(exe, " (deleted)")
+	if filepath.Base(exe) != "vpnpa" {
+		return false
+	}
+	raw, err := procCmdline(pid)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(string(raw), "\x00")
+	for _, p := range parts[1:] {
+		if p == "run" {
+			return true
+		}
+	}
+	return false
 }
 
 func currentUser() string {
-	if u := os.Getenv("USER"); u != "" {
-		return u
+	u := os.Getenv("USER")
+	if u == "" {
+		cu, err := user.Current()
+		if err != nil {
+			return "$USER"
+		}
+		u = cu.Username
 	}
-	u, err := user.Current()
-	if err != nil {
+	if !safeUser(u) {
 		return "$USER"
 	}
-	return u.Username
+	return u
+}
+
+func safeUser(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ensurePrivateDir creates path as 0700 and tightens an existing directory
+// to 0700. Relative paths and "." are left alone so the process cwd is not chmod'd.
+func ensurePrivateDir(path string) error {
+	if path == "" || path == "." || !filepath.IsAbs(path) {
+		return nil
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("%s: нужен каталог, не ссылка", path)
+	}
+	return os.Chmod(path, 0o700) // #nosec G302 -- каталог должен быть 0700, файл секретов остаётся 0600
 }
 
 func splitGlobal(args []string) (global, rest []string) {

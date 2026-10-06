@@ -11,7 +11,7 @@ import (
 )
 
 // Ingress accepts local connections and dials through the provided Dialer.
-// It listens only on an address the caller already constrained to loopback.
+// Serve must bind a loopback address only; other addresses are rejected.
 type Ingress interface {
 	Serve(ctx context.Context, dial dialer.Dialer) error
 }

@@ -76,6 +76,9 @@ func loadOrCreateKey(dir, id, uri string) (KeyPair, error) {
 	if raw, err := os.ReadFile(path); err == nil {
 		var st storedKey
 		if json.Unmarshal(raw, &st) == nil && st.URIHash == hash && st.Private != "" && st.Public != "" {
+			if err := os.Chmod(path, 0o600); err != nil {
+				return KeyPair{}, err
+			}
 			return KeyPair{Private: st.Private, Public: st.Public, UUID: st.UUID}, nil
 		}
 	}
@@ -92,8 +95,40 @@ func loadOrCreateKey(dir, id, uri string) (KeyPair, error) {
 	if err != nil {
 		return KeyPair{}, err
 	}
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := writeKeyFile(dir, path, body); err != nil {
 		return KeyPair{}, err
 	}
 	return kp, nil
+}
+
+// writeKeyFile replaces path atomically so a crash cannot leave a torn key
+// and rotate the public key on the next Up.
+func writeKeyFile(dir, path string, body []byte) error {
+	tmp, err := os.CreateTemp(dir, ".key-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return os.Chmod(path, 0o600)
 }

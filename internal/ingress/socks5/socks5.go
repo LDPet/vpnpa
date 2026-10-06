@@ -41,7 +41,7 @@ func New(addr string, log *slog.Logger) *Server {
 // Serve accepts until ctx is cancelled. Cancellation closes the listener and
 // both sides of every accepted connection.
 func (s *Server) Serve(ctx context.Context, d dialer.Dialer) error {
-	ln, err := net.Listen("tcp", s.Addr)
+	ln, err := ingress.Listen(s.Addr)
 	if err != nil {
 		return err
 	}
@@ -71,6 +71,8 @@ func (s *Server) Serve(ctx context.Context, d dialer.Dialer) error {
 func (s *Server) handle(ctx context.Context, conn net.Conn, d dialer.Dialer) {
 	id := logx.NewConnID()
 	ctx = logx.WithConnID(ctx, id)
+	stopClient := ingress.CloseOnDone(ctx, conn)
+	defer stopClient()
 	defer func() { _ = conn.Close() }()
 	br := bufio.NewReader(conn)
 	if err := handshake(br, conn); err != nil {
@@ -89,7 +91,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, d dialer.Dialer) {
 		s.Log.Warn("ошибка dial", "conn_id", id, "addr", addr, "err", err)
 		return
 	}
+	stopRemote := ingress.CloseOnDone(ctx, remote)
+	defer stopRemote()
 	defer func() { _ = remote.Close() }()
+	if ctx.Err() != nil {
+		return
+	}
 	if err := writeReply(conn, 0x00); err != nil {
 		return
 	}
@@ -114,11 +121,10 @@ func handshake(br *bufio.Reader, w io.Writer) error {
 	}
 	for _, m := range methods {
 		if m == 0x00 {
-			_, err := w.Write([]byte{0x05, 0x00})
-			return err
+			return writeFull(w, []byte{0x05, 0x00})
 		}
 	}
-	_, _ = w.Write([]byte{0x05, 0xff})
+	_ = writeFull(w, []byte{0x05, 0xff})
 	return errors.New("no acceptable socks auth method")
 }
 
@@ -174,8 +180,21 @@ func readAddr(r io.Reader, atyp byte) (string, error) {
 }
 
 func writeReply(w io.Writer, rep byte) error {
-	_, err := w.Write([]byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-	return err
+	return writeFull(w, []byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+}
+
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }
 
 func pipe(ctx context.Context, a, b net.Conn) {

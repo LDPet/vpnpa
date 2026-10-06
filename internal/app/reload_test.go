@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -123,6 +125,214 @@ func TestReloadDoesNotBounceUnchangedBackend(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not stop")
 	}
+}
+
+func TestReloadKeepsSelectionAndStopsRemoved(t *testing.T) {
+	var mu sync.Mutex
+	made := map[string]*fakeBE{}
+	backend.Register("fake", func(cfg backend.Config, _ backend.Deps) (backend.Backend, error) {
+		f := &fakeBE{id: cfg.ID, prio: cfg.Priority}
+		mu.Lock()
+		made[cfg.URI] = f
+		mu.Unlock()
+		return f, nil
+	})
+	prev := config.KnownTypes.Backends
+	config.KnownTypes.Backends = append(append([]string{}, prev...), "fake")
+	t.Cleanup(func() { config.KnownTypes.Backends = prev })
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	state := filepath.Join(dir, "state")
+	socks := freeAddr(t)
+	httpAddr := freeAddr(t)
+	write := func(backends string) {
+		t.Helper()
+		body := yamlBackends(socks, httpAddr, backends)
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("  - id: vpn-1\n    type: fake\n    priority: 100\n    uri: fake://same\n")
+	f, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(Options{File: f, ConfigPath: cfgPath, StateDir: state, Signals: false})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	waitListen(t, socks)
+	waitStatus(t, filepath.Join(state, "status.json"), `"current": "vpn-1"`)
+
+	mu.Lock()
+	first := made["fake://same"]
+	mu.Unlock()
+	write("  - id: vpn-1\n    type: fake\n    priority: 50\n    uri: fake://same\n  - id: vpn-2\n    type: fake\n    priority: 40\n    uri: fake://new\n")
+	if err := a.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ups, downs := first.counts()
+	if ups != 1 || downs != 0 {
+		t.Fatalf("unchanged backend bounced ups=%d downs=%d", ups, downs)
+	}
+	mu.Lock()
+	second := made["fake://new"]
+	mu.Unlock()
+	ups, downs = second.counts()
+	if ups != 1 || downs != 0 {
+		t.Fatalf("new backend ups=%d downs=%d", ups, downs)
+	}
+	waitStatus(t, filepath.Join(state, "status.json"), `"current": "vpn-1"`)
+	raw, err := os.ReadFile(filepath.Join(state, "status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"priority": 50`) {
+		t.Fatalf("priority not applied: %s", raw)
+	}
+
+	write("  - id: vpn-2\n    type: fake\n    priority: 40\n    uri: fake://new\n")
+	if err := a.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, downs = first.counts()
+	if downs != 1 {
+		t.Fatalf("removed backend downs=%d", downs)
+	}
+	ups, downs = second.counts()
+	if ups != 1 || downs != 0 {
+		t.Fatalf("kept backend bounced ups=%d downs=%d", ups, downs)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop")
+	}
+}
+
+func TestReloadFailureKeepsOldBackend(t *testing.T) {
+	var mu sync.Mutex
+	made := map[string]*fakeBE{}
+	backend.Register("fake", func(cfg backend.Config, _ backend.Deps) (backend.Backend, error) {
+		if strings.HasSuffix(cfg.URI, "bad") {
+			return nil, errors.New("refuse")
+		}
+		f := &fakeBE{id: cfg.ID, prio: cfg.Priority}
+		mu.Lock()
+		made[cfg.URI] = f
+		mu.Unlock()
+		return f, nil
+	})
+	prev := config.KnownTypes.Backends
+	config.KnownTypes.Backends = append(append([]string{}, prev...), "fake")
+	t.Cleanup(func() { config.KnownTypes.Backends = prev })
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	state := filepath.Join(dir, "state")
+	socks := freeAddr(t)
+	httpAddr := freeAddr(t)
+	body := yamlBackends(socks, httpAddr, "  - id: vpn-1\n    type: fake\n    priority: 100\n    uri: fake://same\n")
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(Options{File: f, ConfigPath: cfgPath, StateDir: state, Signals: false})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	waitListen(t, socks)
+
+	bad := yamlBackends(socks, httpAddr, "  - id: vpn-2\n    type: fake\n    priority: 90\n    uri: fake://new\n  - id: vpn-1\n    type: fake\n    priority: 100\n    uri: fake://bad\n")
+	if err := os.WriteFile(cfgPath, []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Reload(context.Background()); err == nil || strings.Contains(err.Error(), "fake://") {
+		t.Fatalf("reload: %v", err)
+	}
+	mu.Lock()
+	first := made["fake://same"]
+	newer := made["fake://new"]
+	mu.Unlock()
+	ups, downs := first.counts()
+	if ups != 1 || downs != 0 {
+		t.Fatalf("old backend ups=%d downs=%d", ups, downs)
+	}
+	ups, downs = newer.counts()
+	if ups != 1 || downs != 1 {
+		t.Fatalf("rolled back backend ups=%d downs=%d", ups, downs)
+	}
+	waitStatus(t, filepath.Join(state, "status.json"), `"current": "vpn-1"`)
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop")
+	}
+}
+
+func TestRunReleasesListeners(t *testing.T) {
+	socks := freeAddr(t)
+	httpAddr := freeAddr(t)
+	body := "listen: " + socks + "\nhttp_listen: " + httpAddr + "\nbackends: []\n"
+	f, err := config.Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(Options{File: f, Signals: false})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Run(ctx) }()
+	waitListen(t, socks)
+	waitListen(t, httpAddr)
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop")
+	}
+	for _, addr := range []string{socks, httpAddr} {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatalf("port %s still held: %v", addr, err)
+		}
+		_ = ln.Close()
+	}
+}
+
+func yamlBackends(socks, httpAddr, backends string) string {
+	return "listen: " + socks + "\nhttp_listen: " + httpAddr + "\nbalancer:\n  type: sticky\n  check_interval: 1h\n  check_timeout: 1s\n  fail_threshold: 3\n  recover_threshold: 1\n  restart_interval: 1h\n  check_urls:\n    - tcp://probe.invalid:9\nbackends:\n" + backends
+}
+
+func waitStatus(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var raw []byte
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(path) // #nosec G304 -- тестовый путь
+		if err == nil && strings.Contains(string(b), want) {
+			return
+		}
+		raw = b
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("status %q missing %q", raw, want)
 }
 
 func freeAddr(t *testing.T) string {

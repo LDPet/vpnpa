@@ -110,6 +110,164 @@ func TestParsePlaceholdersAndUAPI(t *testing.T) {
 	}
 }
 
+func TestDecodeStdBase64WhitespaceAndLength(t *testing.T) {
+	body := []byte("\n{\"dns1\":\"1.1.1.1\",\"ok\":true}\n")
+	comp := qCompress(body)
+	std := base64.StdEncoding.EncodeToString(comp)
+	got, err := DecodeURI("vpn://" + std)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte(`{"dns1":"1.1.1.1","ok":true}`)) {
+		t.Fatalf("whitespace qCompress %s", got)
+	}
+	bad := append([]byte(nil), comp...)
+	bad[3] ^= 0x7f
+	if _, err := DecodeURI("vpn://" + base64.RawURLEncoding.EncodeToString(bad)); err == nil {
+		t.Fatal("accepted qCompress with a mismatched length")
+	}
+}
+
+func TestLastConfigSuppliesMissingFields(t *testing.T) {
+	priv := bytes.Repeat([]byte{0x11}, 32)
+	pub := bytes.Repeat([]byte{0x22}, 32)
+	psk := bytes.Repeat([]byte{0x33}, 32)
+	hpkText := bytes.Repeat([]byte{0x44}, 32)
+	hpkJSON := bytes.Repeat([]byte{0x55}, 32)
+	last := map[string]any{
+		"config":                 "[Interface]\nAddress = 10.8.1.3/32\nAddress = fd00::3/128\nDNS = 1.1.1.1\nDNS = 8.8.8.8\nPrivateKey = " + base64.StdEncoding.EncodeToString(priv) + "\nHeaderProtectionKey = " + base64.StdEncoding.EncodeToString(hpkText) + "\nAllowedIPs = \n[Peer]\nPublicKey = " + base64.StdEncoding.EncodeToString(pub) + "\n",
+		"hostName":               "203.0.113.9",
+		"port":                   4242,
+		"Jc":                     7,
+		"H1":                     "1-2",
+		"H2":                     "3-4",
+		"H3":                     "5-6",
+		"PresharedKey":           base64.StdEncoding.EncodeToString(psk),
+		"HeaderProtectionKey":    hex.EncodeToString(hpkJSON),
+		"ContentPaddingAddition": "10-20",
+		"RandomTrailers":         "on",
+		"allowed_ips":            []any{"10.9.0.0/16", "::/0"},
+		"mtu":                    "1400",
+	}
+	tun, err := ParseFullConfig(envWithLast(t, last, "9.9.9.9", "8.8.4.4"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tun.Addresses) != 2 || tun.Addresses[0].String() != "10.8.1.3" || tun.Addresses[1].String() != "fd00::3" {
+		t.Fatalf("addrs %#v", tun.Addresses)
+	}
+	if len(tun.DNS) != 2 || tun.DNS[0].String() != "1.1.1.1" || tun.DNS[1].String() != "8.8.8.8" {
+		t.Fatalf("dns %#v", tun.DNS)
+	}
+	if tun.HeaderProtectionKeyHex != hex.EncodeToString(hpkText) {
+		t.Fatalf("text header key lost: %s", tun.HeaderProtectionKeyHex)
+	}
+	if tun.PresharedHex != hex.EncodeToString(psk) || tun.JC != "7" || tun.MTU != 1400 || tun.Endpoint != "203.0.113.9:4242" {
+		t.Fatalf("%+v", tun)
+	}
+	if len(tun.AllowedIPs) != 2 || tun.AllowedIPs[0] != "10.9.0.0/16" || tun.AllowedIPs[1] != "::/0" {
+		t.Fatalf("allowed %v", tun.AllowedIPs)
+	}
+	if tun.H1 != "1-2" || tun.RandomTrailers != "true" || tun.ContentPaddingAddition != "10-20" {
+		t.Fatalf("rewritten %+v", tun)
+	}
+	uapi := BuildUAPI(tun)
+	if !strings.Contains(uapi, "header_protection_key="+hex.EncodeToString(hpkText)) {
+		t.Fatalf("uapi missing header key\n%s", uapi)
+	}
+
+	last["config"] = "[Interface]\nAddress = 10.8.1.3/32\nPrivateKey = " + base64.StdEncoding.EncodeToString(priv) + "\n[Peer]\nPublicKey = " + base64.StdEncoding.EncodeToString(pub) + "\n"
+	tun, err = ParseFullConfig(envWithLast(t, last, "9.9.9.9", ""), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tun.HeaderProtectionKeyHex != hex.EncodeToString(hpkJSON) {
+		t.Fatalf("json header key %s", tun.HeaderProtectionKeyHex)
+	}
+	if len(tun.DNS) != 1 || tun.DNS[0].String() != "9.9.9.9" {
+		t.Fatalf("dns fallback %#v", tun.DNS)
+	}
+}
+
+func TestDialDoesNotCallAPI(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		pub := bytes.Repeat([]byte{0x22}, 32)
+		last := map[string]any{
+			"config": "[Interface]\nAddress = 10.8.1.3/32\nPrivateKey = $WIREGUARD_CLIENT_PRIVATE_KEY\n[Peer]\nPublicKey = " + base64.StdEncoding.EncodeToString(pub) + "\nEndpoint = 203.0.113.10:51820\n",
+		}
+		raw, _ := json.Marshal(map[string]string{"config": EncodeURI(envWithLast(t, last, "1.1.1.1", ""))})
+		_, _ = w.Write(raw)
+	}))
+	defer srv.Close()
+	orig := tunnelStarter
+	tunnelStarter = func(Tunnel, *slog.Logger) (tunnelHandle, error) {
+		return tunnelHandle{dial: &noopDial{}, close: func() error { return nil }}, nil
+	}
+	t.Cleanup(func() { tunnelStarter = orig })
+	api := EncodeURI(mustJSON(map[string]string{"api_endpoint": srv.URL, "api_key": "k"}))
+	b := newTestBackend(t, "dial-api", api, t.TempDir(), nil)
+	if err := b.Up(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.DialContext(t.Context(), "tcp", "example.com:443"); err == nil {
+		t.Fatal("expected dial error")
+	}
+	if posts != 1 {
+		t.Fatalf("dial issued API calls: %d", posts)
+	}
+}
+
+func TestStoredKeyModeRepaired(t *testing.T) {
+	dir := t.TempDir()
+	kp, err := loadOrCreateKey(dir, "id1", "vpn://same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "id1")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	again, err := loadOrCreateKey(dir, "id1", "vpn://same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Public != kp.Public {
+		t.Fatal("tightening mode rotated the key")
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %o", st.Mode().Perm())
+	}
+}
+
+func TestDeviceLoggerQuietAndNoPacketDump(t *testing.T) {
+	var buf bytes.Buffer
+	info := slog.New(slog.NewTextHandler(&buf, nil))
+	quiet := deviceLogger(info)
+	quiet.Verbosef("handshake %s", "ok")
+	quiet.Errorf("device error")
+	if buf.Len() != 0 {
+		t.Fatalf("info logger wrote %s", buf.String())
+	}
+	dbg := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	lg := deviceLogger(dbg)
+	lg.Verbosef("%s - Sending handshake initiation", "peer(abcd)")
+	if !strings.Contains(buf.String(), "handshake") {
+		t.Fatalf("debug dropped handshake: %s", buf.String())
+	}
+	buf.Reset()
+	lg.Verbosef("packet %x", bytes.Repeat([]byte{0xab}, 16))
+	lg.Errorf("dump %s", "aa bb cc dd ee ff 00 11 22")
+	if buf.Len() != 0 {
+		t.Fatalf("logged packet bytes:\n%s", buf.String())
+	}
+}
+
 func TestObfuscationFilledFromLastConfig(t *testing.T) {
 	priv := bytes.Repeat([]byte{0x11}, 32)
 	pub := bytes.Repeat([]byte{0x22}, 32)

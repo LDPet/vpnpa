@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"sync"
 
 	"github.com/LDPet/vpnpa/internal/backend"
+	"github.com/LDPet/vpnpa/internal/config"
 	"golang.org/x/net/proxy"
 )
 
@@ -32,20 +32,19 @@ type Backend struct {
 	up bool
 }
 
-// New parses a socks5 URI. The password is not logged.
+// New parses a socks5 URI. The password and the full URI are not logged.
 func New(cfg backend.Config, deps backend.Deps) (*Backend, error) {
-	u, err := url.Parse(cfg.URI)
-	if err != nil || u.Scheme != "socks5" || u.Host == "" {
+	creds, err := config.ParseSOCKS5URI(cfg.URI)
+	if err != nil {
 		return nil, fmt.Errorf("socks5 uri: want socks5://host:port")
 	}
 	var auth *proxy.Auth
-	if u.User != nil {
-		pass, _ := u.User.Password()
-		auth = &proxy.Auth{User: u.User.Username(), Password: pass}
+	if creds.Auth {
+		auth = &proxy.Auth{User: creds.User, Password: creds.Pass}
 	}
-	d, err := proxy.SOCKS5("tcp", u.Host, auth, &net.Dialer{})
+	d, err := proxy.SOCKS5("tcp", creds.Host, auth, &net.Dialer{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("socks5 uri: want socks5://host:port")
 	}
 	cd, ok := d.(proxy.ContextDialer)
 	if !ok {
@@ -58,7 +57,7 @@ func New(cfg backend.Config, deps backend.Deps) (*Backend, error) {
 	return &Backend{
 		id:       cfg.ID,
 		priority: cfg.Priority,
-		host:     u.Host,
+		host:     creds.Host,
 		dialer:   cd,
 		log:      log,
 	}, nil

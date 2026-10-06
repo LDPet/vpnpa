@@ -24,7 +24,13 @@ type apiRequest struct {
 }
 
 // httpClient is replaced in tests when they need a custom transport.
-var httpClient = &http.Client{Timeout: 20 * time.Second}
+// Redirects are not followed: a vpn:// link must not move the API key to another host.
+var httpClient = &http.Client{
+	Timeout: 20 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 func fetchAPIConfig(ctx context.Context, endpoint, apiKey string, kp KeyPair) ([]byte, error) {
 	body, err := json.Marshal(apiRequest{

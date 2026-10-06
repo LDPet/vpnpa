@@ -1,14 +1,30 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/LDPet/vpnpa/internal/atomicfile"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrBadSOCKS5URI is returned when a socks5 backend URI is not
+// socks5://host:port. The error text never includes the URI or password.
+var ErrBadSOCKS5URI = errors.New("socks5 uri must be socks5://host:port")
+
+// SOCKS5Creds is the host:port of a foreign proxy. User and Pass are set only
+// when the URI has userinfo. Callers must not log Pass or the original URI.
+type SOCKS5Creds struct {
+	Host string
+	User string
+	Pass string
+	Auth bool
+}
 
 // Save writes f to path with mode 0600. Existing permissions are never widened.
 func Save(path string, f File) error {
@@ -74,8 +90,8 @@ func Add(path, id, uri string) (Backend, error) {
 // AddSOCKS5 appends a socks5 backend. uri must be socks5://.
 func AddSOCKS5(path, id, uri string) (Backend, error) {
 	uri = strings.TrimSpace(uri)
-	if err := validateSOCKS5URI(uri); err != nil {
-		return Backend{}, err
+	if _, err := ParseSOCKS5URI(uri); err != nil {
+		return Backend{}, fmt.Errorf("vpnpa add-socks5 принимает только ссылку socks5://host:port")
 	}
 	return add(path, id, "socks5", uri)
 }
@@ -130,25 +146,38 @@ func nextPriority(backends []Backend) int {
 	return min - 10
 }
 
-func validateSOCKS5URI(uri string) error {
-	if strings.HasPrefix(uri, "vpn://") {
-		return fmt.Errorf("vpnpa add-socks5 принимает только ссылку socks5://")
+// ParseSOCKS5URI checks a socks5://host:port URI with an optional username and
+// password. Errors do not contain the URI or the password.
+func ParseSOCKS5URI(uri string) (SOCKS5Creds, error) {
+	u, err := url.Parse(strings.TrimSpace(uri))
+	if err != nil || u.Scheme != "socks5" || u.Host == "" || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return SOCKS5Creds{}, ErrBadSOCKS5URI
 	}
-	u, err := url.Parse(uri)
-	if err != nil || u.Scheme != "socks5" || u.Host == "" {
-		return fmt.Errorf("vpnpa add-socks5 принимает только ссылку socks5://")
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil || host == "" || port == "" {
+		return SOCKS5Creds{}, ErrBadSOCKS5URI
 	}
-	return nil
+	pn, err := strconv.Atoi(port)
+	if err != nil || pn < 1 || pn > 65535 {
+		return SOCKS5Creds{}, ErrBadSOCKS5URI
+	}
+	creds := SOCKS5Creds{Host: u.Host}
+	if u.User != nil {
+		creds.User = u.User.Username()
+		creds.Pass, _ = u.User.Password()
+		if creds.User == "" || len(creds.User) > 255 || len(creds.Pass) > 255 {
+			return SOCKS5Creds{}, ErrBadSOCKS5URI
+		}
+		creds.Auth = true
+	}
+	return creds, nil
 }
 
 // SOCKS5Endpoint returns host:port without userinfo.
 func SOCKS5Endpoint(uri string) (string, error) {
-	u, err := url.Parse(uri)
+	creds, err := ParseSOCKS5URI(uri)
 	if err != nil {
 		return "", err
 	}
-	if u.Host == "" {
-		return "", fmt.Errorf("socks5 uri has no host")
-	}
-	return u.Host, nil
+	return creds.Host, nil
 }

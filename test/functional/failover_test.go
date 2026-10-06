@@ -20,14 +20,15 @@ import (
 const probeAddr = "probe.invalid:9"
 
 type fake struct {
-	id    string
-	prio  int
-	echo  string
-	mu    sync.Mutex
-	fail  bool
-	downs int
-	users int
-	conns []net.Conn
+	id       string
+	prio     int
+	echo     string
+	mu       sync.Mutex
+	fail     bool
+	failUser bool
+	downs    int
+	users    int
+	conns    []net.Conn
 }
 
 func (f *fake) ID() string               { return f.id }
@@ -54,6 +55,12 @@ func (f *fake) DialContext(ctx context.Context, network, address string) (net.Co
 		a, b := net.Pipe()
 		_ = b.Close()
 		return a, nil
+	}
+	f.mu.Lock()
+	failUser := f.failUser
+	f.mu.Unlock()
+	if failUser {
+		return nil, errors.New("user dial failed")
 	}
 	var d net.Dialer
 	c, err := d.DialContext(ctx, network, f.echo)
@@ -196,6 +203,67 @@ func TestBothDeadSOCKSErrors(t *testing.T) {
 	}
 	if !errors.Is(err, dialer.ErrNoHealthyBackend) && err.Error() == "" {
 		t.Fatal(err)
+	}
+	if u, _ := a.stats(); u != 0 {
+		t.Fatalf("backend a accepted %d dials with no healthy backend", u)
+	}
+	if u, _ := b.stats(); u != 0 {
+		t.Fatalf("backend b accepted %d dials with no healthy backend", u)
+	}
+}
+
+func TestUserDialErrorDoesNotMoveTraffic(t *testing.T) {
+	echo := startEcho(t)
+	high := &fake{id: "high", prio: 100, echo: echo}
+	low := &fake{id: "low", prio: 50, echo: echo}
+	bal := sticky.New([]backend.Backend{high, low}, sticky.Options{
+		CheckTimeout:     time.Second,
+		FailThreshold:    3,
+		RecoverThreshold: 2,
+		RestartInterval:  time.Hour,
+		CheckURLs:        []string{"tcp://" + probeAddr},
+		EgressURL:        "http://127.0.0.1:1/ip",
+		EgressInterval:   time.Hour,
+		Logger:           slog.New(slog.DiscardHandler),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < 2; i++ {
+		bal.ProbeNow(ctx)
+	}
+	socksAddr := freeAddr(t)
+	go func() { _ = socks5.New(socksAddr, slog.New(slog.DiscardHandler)).Serve(ctx, bal) }()
+	waitListen(t, socksAddr)
+
+	high.mu.Lock()
+	high.failUser = true
+	high.mu.Unlock()
+	d, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Dial("tcp", echo); err == nil {
+		t.Fatal("expected dial error")
+	}
+	if bal.Snapshot().Current != "high" {
+		t.Fatalf("current=%s", bal.Snapshot().Current)
+	}
+	if u, _ := low.stats(); u != 0 {
+		t.Fatalf("standby saw %d dials after a user error", u)
+	}
+	high.mu.Lock()
+	high.failUser = false
+	high.mu.Unlock()
+	conn := dialEcho(t, socksAddr, echo)
+	if _, err := conn.Write([]byte("still")); err != nil {
+		t.Fatal(err)
+	}
+	readN(t, conn, "still")
+	if u, _ := high.stats(); u != 1 {
+		t.Fatalf("primary dials=%d", u)
+	}
+	if u, _ := low.stats(); u != 0 {
+		t.Fatalf("standby dials=%d", u)
 	}
 }
 

@@ -40,12 +40,12 @@ func TestHostnameForwarded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := client.Dial("tcp", "example.com:80")
+	conn, err := client.Dial("tcp", "ExAmPle.COM:80")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if d.addr != "example.com:80" {
+	if d.addr != "ExAmPle.COM:80" {
 		t.Fatalf("dialed %q", d.addr)
 	}
 	if _, err := conn.Write([]byte("ping")); err != nil {
@@ -101,6 +101,112 @@ func TestContextClosesBothSides(t *testing.T) {
 	_ = d.remote.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := d.remote.Read(buf); err == nil {
 		t.Fatal("remote still open")
+	}
+}
+
+func TestUDPAssociateNotDialed(t *testing.T) {
+	lnAddr := freeAddr(t)
+	srv := New(lnAddr, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &recDial{}
+	go func() { _ = srv.Serve(ctx, d) }()
+	waitListen(t, lnAddr)
+
+	conn, err := net.Dial("tcp", lnAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatal(err)
+	}
+	greet := make([]byte, 2)
+	if _, err := io.ReadFull(conn, greet); err != nil {
+		t.Fatal(err)
+	}
+	if greet[0] != 0x05 || greet[1] != 0x00 {
+		t.Fatalf("greeting %v", greet)
+	}
+	// UDP ASSOCIATE, IPv4 0.0.0.0:0.
+	if _, err := conn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	rep := make([]byte, 10)
+	if _, err := io.ReadFull(conn, rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep[1] != 0x07 {
+		t.Fatalf("udp associate reply %d", rep[1])
+	}
+	if d.addr != "" {
+		t.Fatalf("udp associate dialed %q", d.addr)
+	}
+}
+
+func TestUsernamePasswordRejected(t *testing.T) {
+	lnAddr := freeAddr(t)
+	srv := New(lnAddr, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &recDial{}
+	go func() { _ = srv.Serve(ctx, d) }()
+	waitListen(t, lnAddr)
+
+	conn, err := net.Dial("tcp", lnAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
+		t.Fatal(err)
+	}
+	greet := make([]byte, 2)
+	if _, err := io.ReadFull(conn, greet); err != nil {
+		t.Fatal(err)
+	}
+	if greet[0] != 0x05 || greet[1] != 0xff {
+		t.Fatalf("auth reply %v", greet)
+	}
+	if d.addr != "" {
+		t.Fatal("auth-only client was dialed")
+	}
+}
+
+func TestCancelUnblocksIdleConn(t *testing.T) {
+	lnAddr := freeAddr(t)
+	srv := New(lnAddr, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, &recDial{}) }()
+	waitListen(t, lnAddr)
+	conn, err := net.Dial("tcp", lnAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve blocked on an idle connection")
+	}
+}
+
+func TestRejectsNonLoopback(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:0", "1.2.3.4:1080", ":1080", "localhost:1080"} {
+		t.Run(addr, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := New(addr, slog.New(slog.DiscardHandler)).Serve(ctx, &recDial{})
+			if err == nil {
+				t.Fatal("non-loopback listen was accepted")
+			}
+		})
 	}
 }
 
