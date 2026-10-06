@@ -30,9 +30,10 @@ type storedKey struct {
 	UUID    string `json:"uuid"`
 }
 
-// GenerateKeyPair возвращает зажатый ключ X25519 и случайный UUID.
-// Clamping (биты 0..2 и старшие биты последнего байта) — требование Curve25519,
-// без него сервер не примет публичный ключ как ключ WireGuard.
+// GenerateKeyPair возвращает ключ X25519 и случайный UUID.
+// Две побитовые правки записывают в файл уже зажатый скаляр WireGuard.
+// curve25519.X25519 и так зажимает копию на время умножения; без этих строк
+// сохранённый секрет не совпал бы с каноническим видом ключа.
 func GenerateKeyPair() (KeyPair, error) {
 	var priv [32]byte
 	if _, err := rand.Read(priv[:]); err != nil {

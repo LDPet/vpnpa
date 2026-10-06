@@ -63,9 +63,9 @@ func BuildUAPI(t Tunnel) string {
 	return b.String()
 }
 
-// RedactUAPI подменяет материал ключей перед debug-логом.
-// endpoint, диапазоны H/S и прочие параметры обфускации остаются: по ним
-// видно, что именно ушло в устройство, но не сам ключ.
+// RedactUAPI прячет перед debug-логом только private_key, preshared_key
+// и header_protection_key. public_key пира, endpoint и параметры обфускации
+// остаются: по ним видно, что ушло в устройство.
 func RedactUAPI(uapi string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(uapi, "\n") {

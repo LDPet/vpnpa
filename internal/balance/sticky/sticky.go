@@ -3,8 +3,9 @@
 //
 // Текущий бэкенд проба не гасит и не поднимает заново: Down/Up по
 // restart_interval делается только у того, кто уже не текущий. Проба
-// успешна, если хотя бы один URL из пары (или из check_urls) ответил 204.
-// Файл prefer перечитывается на каждом цикле и может прибить выбор к id.
+// успешна, если хотя бы один URL из списка ответил: для http(s) это ровно
+// статус 204, для tcp:// — открывшееся соединение. Файл prefer
+// перечитывается на каждом цикле и может прибить выбор к id.
 package sticky
 
 import (
@@ -56,7 +57,9 @@ type Options struct {
 	// правила. Иначе id, если этот бэкенд жив и сейчас не в Down/Up.
 	PreferPath string
 	Logger     *slog.Logger
-	// OnStatus вызывается после смены снимка. Демон пишет им status.json.
+	// OnStatus вызывается в конце каждого завершённого цикла проб, даже если
+	// поля снимка те же. Демон пишет им status.json. Внешний IP шлётся отдельно,
+	// и только когда строка IP изменилась.
 	OnStatus func(Status)
 	// Now подменяет часы restart_interval. Тесты двигают время сами.
 	Now func() time.Time
@@ -81,8 +84,9 @@ type Status struct {
 	Backends   []BackendStatus `json:"backends"`
 }
 
-// health — счётчики одного id. alive переключается только порогами,
-// не одной пробой. nextRestart — момент, когда нетекущему мёртвому
+// health — счётчики одного id. alive переключается, когда подряд набралось
+// FailThreshold провалов или RecoverThreshold успехов. Пороги по умолчанию
+// больше единицы, но в конфиге могут быть 1. nextRestart — момент, когда нетекущему мёртвому
 // разрешён один Down+Up. restarting стоит на время этого Down/Up:
 // иначе проба успеет выбрать бэкенд и тут же закроет его под трафиком.
 type health struct {
@@ -188,10 +192,12 @@ func (s *Sticky) Run(ctx context.Context) {
 	}
 }
 
-// SetBackends подменяет список для следующих циклов. Тот же экземпляр
-// (тот же указатель) сохраняет здоровье и серии. Текущий id остаётся,
-// если он ещё в списке и жив. Вызывается после SIGHUP: app передаёт те же
-// tracked-указатели для неизменных URI, поэтому Down/Up им не нужен.
+// SetBackends подменяет список для следующих циклов. Тот же указатель
+// сохраняет здоровье и серии. Затем reselect: id из prefer забирает выбор
+// только если он selectable (жив и не в restarting), даже когда прежний
+// текущий тоже жив. Иначе текущий остаётся, если он ещё в списке и selectable.
+// Вызывается после SIGHUP: app передаёт те же tracked-указатели для неизменных
+// URI, поэтому Down/Up им не нужен.
 func (s *Sticky) SetBackends(list []backend.Backend) {
 	s.mu.Lock()
 	s.setBackendsLocked(list)
@@ -380,10 +386,11 @@ func (s *Sticky) apply(ctx context.Context, results []probeResult) {
 		if becameDead {
 			s.opt.Logger.Info("бэкенд нежив", "backend", r.b.ID(), "priority", r.b.Priority())
 			isCurrent := isCurrentID(s.current, r.b.ID())
-			// Проба текущий бэкенд не закрывает. Интервал отсчитывается сейчас,
-			// но Down+Up встанет в очередь только если он уже не текущий.
-			// Если он ещё текущий, reselect ниже уйдёт с него (если есть замена),
-			// а переподъём случится на следующем цикле, когда nextRestart наступит.
+			// Проба текущий бэкенд не закрывает. nextRestart становится now+интервал,
+			// и в очередь Down+Up бэкенд попадает, только если он уже не текущий.
+			// Если он ещё текущий, reselect в этом же цикле снимает выбор:
+			// бэкенд больше не selectable, даже когда живой замены нет.
+			// Сам Down+Up не в этом цикле. Его пустят те циклы, где now >= nextRestart.
 			h.nextRestart = s.now().Add(s.opt.RestartInterval)
 			if !isCurrent && !h.restarting {
 				jobs = append(jobs, job{b: r.b})
@@ -645,7 +652,8 @@ func (s *Sticky) highestSelectableLocked() backend.Backend {
 }
 
 // observe двигает серии. Успех обнуляет провалы и наоборот.
-// alive меняется только когда серия добрала порог, не с первой пробы.
+// alive меняется, когда серия добрала failN или recN. При пороге 1
+// для этого хватает одной пробы.
 func (h *health) observe(ok bool, failN, recN int) (becameDead, becameAlive bool) {
 	if ok {
 		h.failStreak = 0
@@ -799,8 +807,9 @@ func fetchEgress(ctx context.Context, b backend.Backend, raw string) (string, er
 }
 
 // readPrefer читает файл предпочтения заново на каждом цикле.
-// Нет файла, пусто или ошибка — "auto": выбор по правилам приоритета.
-// Команда `vpnpa prefer` только пишет файл, сигнал демону не нужен.
+// Нет файла, пусто или ошибка — "auto". При auto живой текущий остаётся,
+// даже если ожил бэкенд с большим приоритетом. Наибольший приоритет берётся,
+// только когда текущего уже нельзя выбрать. `vpnpa prefer` только пишет файл.
 func readPrefer(path string) string {
 	if path == "" {
 		return "auto"

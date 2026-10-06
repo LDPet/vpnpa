@@ -66,8 +66,9 @@ func Write(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-// restrictPerm оставляет биты владельца из requested и сохраняет group/world
-// только там, где они уже были у existing.
+// restrictPerm берёт биты владельца из requested. Group и world остаются
+// только на пересечении requested и existing. Запрос 0600 на файл 0644
+// даёт 0600: чужие биты, которых нет в запросе, не сохраняются.
 func restrictPerm(existing, requested os.FileMode) os.FileMode {
 	const groupWorld = os.FileMode(0o077)
 	return (requested &^ groupWorld) | (requested & existing & groupWorld)

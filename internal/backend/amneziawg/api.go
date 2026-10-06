@@ -25,7 +25,7 @@ type apiRequest struct {
 	UUID       string `json:"uuid"`
 }
 
-// httpClient подменяется в тестах, которым нужен свой транспорт.
+// httpClient вынесен переменной. Текущие тесты ходят им в httptest и не подменяют его.
 // Редиректы не следуются: ссылка vpn:// не должна унести API-ключ на другой хост.
 var httpClient = &http.Client{
 	Timeout: 20 * time.Second,

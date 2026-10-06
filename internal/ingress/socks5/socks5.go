@@ -206,8 +206,10 @@ func writeFull(w io.Writer, p []byte) error {
 	return nil
 }
 
-// pipe копирует байты в обе стороны. CloseWrite на половине, которая первой
-// дочитала, отдаёт второй стороне EOF, не обрывая её запись.
+// pipe копирует байты в обе стороны. Когда io.Copy из b в a дочитал EOF,
+// closeWrite вызывается на a — на стороне, куда писали, — и отдаёт EOF
+// получателю, не обрывая копирование в обратную сторону. Второе направление
+// симметрично.
 func pipe(ctx context.Context, a, b net.Conn) {
 	done := make(chan struct{})
 	go func() {

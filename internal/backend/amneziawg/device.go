@@ -53,8 +53,9 @@ func startTunnel(t Tunnel, log *slog.Logger) (tunnelHandle, error) {
 	return tunnelHandle{dial: tnet, close: func() error { dev.Close(); return nil }}, nil
 }
 
-// deviceLogger отдаёт сообщения библиотеки в slog только на уровне debug.
-// Дампы пакетов отбрасываются и там: в журнал не должна попадать полезная нагрузка.
+// deviceLogger молчит, пока у slog не включён debug: тогда отбрасываются
+// и Verbosef, и Errorf. При включённом debug Verbosef пишется как Debug,
+// а Errorf — как Warn. Дампы пакетов отбрасываются в обоих каналах.
 func deviceLogger(log *slog.Logger) *device.Logger {
 	if log == nil || !log.Enabled(context.Background(), slog.LevelDebug) {
 		return &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf}

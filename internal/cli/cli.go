@@ -1,7 +1,8 @@
-// Package cli — команды vpnpa. `run` крутит демон в этом процессе.
-// Остальные команды правят файлы в домашнем каталоге и зовут `systemctl --user`.
-// SIGHUP живому демону посылают add и add-socks5, предварительно сверив,
-// что MainPID — это `vpnpa run`, а не переиспользованный pid.
+// Package cli — команды vpnpa. run крутит демон в этом процессе.
+// add и add-socks5 пишут конфиг и шлют SIGHUP живому `vpnpa run`, сверив MainPID.
+// prefer только пишет файл. list и status читают файлы. logs зовёт journalctl.
+// up, down, enable и disable зовут systemctl --user. update подменяет бинарник
+// и перезапускает сервис, только если тот уже active.
 package cli
 
 import (

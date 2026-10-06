@@ -26,8 +26,8 @@ import (
 	"github.com/LDPet/vpnpa/internal/config"
 	"github.com/LDPet/vpnpa/internal/ingress"
 
-	// Пустой импорт вызывает init и регистрирует фабрику. Без этих строк
-	// New не знает типов, хотя пакеты лежат в модуле.
+	// Пустой импорт вызывает init и регистрирует фабрики. Без этих строк
+	// backend.New и ingress.New не знают типов. app.New реестр не смотрит.
 	_ "github.com/LDPet/vpnpa/internal/backend/amneziawg"
 	_ "github.com/LDPet/vpnpa/internal/backend/socks5"
 	_ "github.com/LDPet/vpnpa/internal/ingress/http"
@@ -311,8 +311,12 @@ func (a *App) Reload(ctx context.Context) error {
 // upAll приводит набор бэкендов к specs.
 // Совпадение id, URI и типа — оставить tracked, обновить только приоритет.
 // Совпадение id при другом URI — поднять новый и swap в старый tracked.
-// Новый id — новый tracked. Ошибка Up логируется, но бэкенд остаётся в списке:
-// проба сама пометит его мёртвым. Ошибка New откатывает уже поднятые в этой попытке.
+// Новый id — новый tracked, у sticky он начинает с alive=false.
+// Смена URI оставляет тот же указатель, поэтому прежнее alive не сбрасывается,
+// даже если Up нового inner не удался. Ошибка Up только логируется, бэкенд
+// остаётся в списке. Неудачная проба переводит в неживые лишь уже живой id.
+// Удачные пробы до порога восстановления делают новый id живым.
+// Ошибка New откатывает уже поднятые в этой попытке.
 func (a *App) upAll(ctx context.Context, specs []config.Backend, prev map[string]*managed) ([]backend.Backend, error) {
 	type item struct {
 		spec  config.Backend

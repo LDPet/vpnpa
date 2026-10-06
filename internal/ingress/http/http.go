@@ -85,7 +85,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, d dialer.Dialer) {
 	}
 	// CONNECT несёт authority в цели запроса: "example.com:443", не URL с путём.
 	// Эти байты уходят в Dialer как есть. Заголовок Host не предпочитается,
-	// имя на хосте не резолвится — его резолвит уже туннель (DNS из ссылки или SOCKS5).
+	// имя на этой машине не резолвится. Дальше решает бэкенд: netstack AmneziaWG
+	// резолвит его DNS из ссылки, исходящий SOCKS5 отдаёт домен в CONNECT как имя.
 	addr := connectTarget(req)
 	if addr == "" {
 		_ = reject(conn, http.StatusBadRequest)
