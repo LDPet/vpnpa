@@ -16,10 +16,8 @@ import (
 )
 
 func TestUpIsTCPAndDownLeavesProxy(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Parallel()
+	ln := listenLocal(t)
 	defer func() { _ = ln.Close() }()
 	b, err := New(backend.Config{
 		ID: "adguard", Type: "socks5", Priority: 90,
@@ -54,6 +52,7 @@ func TestUpIsTCPAndDownLeavesProxy(t *testing.T) {
 }
 
 func TestDialForwardsHostnameAndHidesPassword(t *testing.T) {
+	t.Parallel()
 	got := &capture{}
 	addr := serveSOCKS(t, "user", "p@ss", got)
 	var logs bytes.Buffer
@@ -98,6 +97,7 @@ func TestDialForwardsHostnameAndHidesPassword(t *testing.T) {
 }
 
 func TestNoAuthAndBadURI(t *testing.T) {
+	t.Parallel()
 	got := &capture{}
 	addr := serveSOCKS(t, "", "", got)
 	b, err := New(backend.Config{
@@ -122,21 +122,19 @@ func TestNoAuthAndBadURI(t *testing.T) {
 	if _, err := New(backend.Config{ID: "x", Type: "socks5", URI: "socks5://user:s3cret@127.0.0.1"}, backend.Deps{}); err == nil || bytes.Contains([]byte(err.Error()), []byte("s3cret")) {
 		t.Fatalf("bad uri: %v", err)
 	}
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	closedAddr := closed.Addr().String()
-	_ = closed.Close()
+	// Порт закрыт, и пока Up не вернёт отказ, другие тесты пакета его не занимают:
+	// иначе t.Parallel подставит живой listener и Up ошибочно сочтёт прокси живым.
 	var logs bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	down, err := New(backend.Config{
-		ID: "x", Type: "socks5", URI: "socks5://user:s3cret@" + closedAddr,
-	}, backend.Deps{Logger: log})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = down.Up(context.Background())
+	err = refuseOnClosedPort(t, func(closedAddr string) error {
+		log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		down, err := New(backend.Config{
+			ID: "x", Type: "socks5", URI: "socks5://user:s3cret@" + closedAddr,
+		}, backend.Deps{Logger: log})
+		if err != nil {
+			return err
+		}
+		return down.Up(context.Background())
+	})
 	if err == nil {
 		t.Fatal("up dialed a closed port")
 	}
@@ -174,12 +172,39 @@ func (c *capture) wait(t *testing.T) (host string, atyp byte, user, pass string)
 	return "", 0, "", ""
 }
 
-func serveSOCKS(t *testing.T, user, pass string, got *capture) string {
+// portMu сериализует bind в пакете. Слушатель держит порт сам, а отказной
+// тест держит замок на всё время dial, потому что порт после Close ничей.
+var portMu sync.Mutex
+
+func listenLocal(t *testing.T) net.Listener {
 	t.Helper()
+	portMu.Lock()
+	defer portMu.Unlock()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return ln
+}
+
+func refuseOnClosedPort(t *testing.T, up func(addr string) error) error {
+	t.Helper()
+	portMu.Lock()
+	defer portMu.Unlock()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return up(addr)
+}
+
+func serveSOCKS(t *testing.T, user, pass string, got *capture) string {
+	t.Helper()
+	ln := listenLocal(t)
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {

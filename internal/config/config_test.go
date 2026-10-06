@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseDefaultsAndRejects(t *testing.T) {
+	t.Parallel()
 	f, err := Parse([]byte(Template()))
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +70,7 @@ func TestParseDefaultsAndRejects(t *testing.T) {
 }
 
 func TestFileModeAndInstallKeepsConfig(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if _, err := InstallConfig(path); err != nil {
@@ -108,6 +110,7 @@ func TestFileModeAndInstallKeepsConfig(t *testing.T) {
 }
 
 func TestAddSchemesAndMode(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if _, err := InstallConfig(path); err != nil {
@@ -150,6 +153,7 @@ func TestAddSchemesAndMode(t *testing.T) {
 }
 
 func TestDefaultIDsPrioritiesAndEndpoint(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	if _, err := InstallConfig(path); err != nil {

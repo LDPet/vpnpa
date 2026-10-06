@@ -49,6 +49,9 @@ func (f *fakeBE) counts() (int, int) {
 	return f.ups, f.downs
 }
 
+// Три теста reload остаются последовательными: они подменяют общий
+// backend.Register("fake") и срез config.KnownTypes. Отдельная фабрика
+// на тест потребовала бы другого реестра, то есть смены поведения.
 func TestReloadDoesNotBounceUnchangedBackend(t *testing.T) {
 	var mu sync.Mutex
 	made := map[string]*fakeBE{}
@@ -285,6 +288,7 @@ func TestReloadFailureKeepsOldBackend(t *testing.T) {
 }
 
 func TestRunReleasesListeners(t *testing.T) {
+	t.Parallel()
 	socks := freeAddr(t)
 	httpAddr := freeAddr(t)
 	body := "listen: " + socks + "\nhttp_listen: " + httpAddr + "\nbackends: []\n"

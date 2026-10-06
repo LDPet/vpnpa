@@ -154,6 +154,7 @@ func TestSystemctlUnavailableHint(t *testing.T) {
 }
 
 func TestUpdateChecksum(t *testing.T) {
+	t.Parallel()
 	const good = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	sum, err := checksumFor(good+"  vpnpa-linux-amd64\n", "vpnpa-linux-amd64")
 	if err != nil || sum != good {
@@ -250,6 +251,7 @@ func TestLogsArgvIsFixed(t *testing.T) {
 	}
 }
 
+// Последовательно: подменяет пакетные killProc, procExe и procCmdline.
 func TestSignalReloadOnlyVpnpaMainPID(t *testing.T) {
 	var killed int
 	prevKill := killProc

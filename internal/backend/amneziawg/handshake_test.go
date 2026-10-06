@@ -21,6 +21,7 @@ import (
 )
 
 func TestUserspaceHandshake(t *testing.T) {
+	t.Parallel()
 	serverKey, err := GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)

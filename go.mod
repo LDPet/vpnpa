@@ -1,6 +1,6 @@
 module github.com/LDPet/vpnpa
 
-go 1.25.0
+go 1.27.1
 
 require (
 	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828

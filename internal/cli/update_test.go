@@ -18,6 +18,7 @@ import (
 )
 
 func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
+	t.Parallel()
 	payload := []byte("new-vpnpa-binary")
 	sum := sha256.Sum256(payload)
 	asset, err := releaseAsset()
@@ -119,6 +120,7 @@ func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
 }
 
 func TestUpdateRejectsBadChecksumAndLeavesNoTemp(t *testing.T) {
+	t.Parallel()
 	asset, err := releaseAsset()
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +164,7 @@ func TestUpdateRejectsBadChecksumAndLeavesNoTemp(t *testing.T) {
 }
 
 func TestUpdateDoesNotFetchOffAllowlist(t *testing.T) {
+	t.Parallel()
 	var hits int
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -190,6 +193,7 @@ func TestUpdateDoesNotFetchOffAllowlist(t *testing.T) {
 }
 
 func TestReleaseURLPolicy(t *testing.T) {
+	t.Parallel()
 	ok := []string{
 		"https://github.com/LDPet/vpnpa/releases/latest/download/SHA256SUMS",
 		"https://release-assets.githubusercontent.com/asset",

@@ -6,7 +6,7 @@
 
 ## Сборка из исходников
 
-Нужен Go 1.25: его требует `amneziawg-go` v3.
+Нужен Go 1.27.1.
 
 ```bash
 go build -o vpnpa ./cmd/vpnpa

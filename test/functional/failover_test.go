@@ -88,6 +88,7 @@ func (f *fake) stats() (users, downs int) {
 }
 
 func TestSOCKSFailoverKeepsOldStream(t *testing.T) {
+	t.Parallel()
 	echo := startEcho(t)
 	high := &fake{id: "high", prio: 100, echo: echo}
 	low := &fake{id: "low", prio: 50, echo: echo}
@@ -112,9 +113,10 @@ func TestSOCKSFailoverKeepsOldStream(t *testing.T) {
 		t.Fatalf("current=%s", bal.Snapshot().Current)
 	}
 
-	socksAddr := freeAddr(t)
+	socksAddr, releasePort := freeAddr(t)
 	go func() { _ = socks5.New(socksAddr, slog.New(slog.DiscardHandler)).Serve(ctx, bal) }()
 	waitListen(t, socksAddr)
+	releasePort()
 
 	conn := dialEcho(t, socksAddr, echo)
 	if _, err := conn.Write([]byte("one")); err != nil {
@@ -170,6 +172,7 @@ func TestSOCKSFailoverKeepsOldStream(t *testing.T) {
 }
 
 func TestBothDeadSOCKSErrors(t *testing.T) {
+	t.Parallel()
 	echo := startEcho(t)
 	a := &fake{id: "a", prio: 100, echo: echo}
 	b := &fake{id: "b", prio: 50, echo: echo}
@@ -186,9 +189,10 @@ func TestBothDeadSOCKSErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	bal.ProbeNow(ctx)
-	socksAddr := freeAddr(t)
+	socksAddr, releasePort := freeAddr(t)
 	go func() { _ = socks5.New(socksAddr, slog.New(slog.DiscardHandler)).Serve(ctx, bal) }()
 	waitListen(t, socksAddr)
+	releasePort()
 	a.setFail(true)
 	b.setFail(true)
 	bal.ProbeNow(ctx)
@@ -216,6 +220,7 @@ func TestBothDeadSOCKSErrors(t *testing.T) {
 }
 
 func TestUserDialErrorDoesNotMoveTraffic(t *testing.T) {
+	t.Parallel()
 	echo := startEcho(t)
 	high := &fake{id: "high", prio: 100, echo: echo}
 	low := &fake{id: "low", prio: 50, echo: echo}
@@ -234,9 +239,10 @@ func TestUserDialErrorDoesNotMoveTraffic(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		bal.ProbeNow(ctx)
 	}
-	socksAddr := freeAddr(t)
+	socksAddr, releasePort := freeAddr(t)
 	go func() { _ = socks5.New(socksAddr, slog.New(slog.DiscardHandler)).Serve(ctx, bal) }()
 	waitListen(t, socksAddr)
+	releasePort()
 
 	high.mu.Lock()
 	high.failUser = true
@@ -272,7 +278,9 @@ func TestUserDialErrorDoesNotMoveTraffic(t *testing.T) {
 
 func startEcho(t *testing.T) string {
 	t.Helper()
+	bindMu.Lock()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	bindMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,15 +326,27 @@ func readN(t *testing.T, c net.Conn, want string) {
 	}
 }
 
-func freeAddr(t *testing.T) string {
+// bindMu закрывает зазор «Listen(:0) отпустил порт — Serve ещё не занял его».
+// startEcho берёт тот же замок, чтобы не занять этот номер, пока он свободен.
+var bindMu sync.Mutex
+
+func freeAddr(t *testing.T) (string, func()) {
 	t.Helper()
+	bindMu.Lock()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		bindMu.Unlock()
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	if err := ln.Close(); err != nil {
+		bindMu.Unlock()
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(bindMu.Unlock) }
+	t.Cleanup(release)
+	return addr, release
 }
 
 func waitListen(t *testing.T, addr string) {

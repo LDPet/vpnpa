@@ -7,6 +7,7 @@ import (
 )
 
 func TestWriteModeDoesNotWeaken(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "state", "vpnpa")
 	path := filepath.Join(sub, "config.yaml")
