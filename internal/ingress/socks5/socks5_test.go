@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,13 +30,14 @@ func (r *recDial) DialContext(_ context.Context, _, address string) (net.Conn, e
 
 func TestHostnameForwarded(t *testing.T) {
 	t.Parallel()
-	lnAddr := freeAddr(t)
+	lnAddr, releasePort := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &recDial{}
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, lnAddr)
+	releasePort()
 
 	client, err := proxy.SOCKS5("tcp", lnAddr, nil, proxy.Direct)
 	if err != nil {
@@ -63,13 +65,14 @@ func TestHostnameForwarded(t *testing.T) {
 
 func TestDialErrorBecomesClientError(t *testing.T) {
 	t.Parallel()
-	lnAddr := freeAddr(t)
+	lnAddr, releasePort := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &recDial{err: io.EOF}
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, lnAddr)
+	releasePort()
 	client, err := proxy.SOCKS5("tcp", lnAddr, nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
@@ -81,12 +84,13 @@ func TestDialErrorBecomesClientError(t *testing.T) {
 
 func TestContextClosesBothSides(t *testing.T) {
 	t.Parallel()
-	lnAddr := freeAddr(t)
+	lnAddr, releasePort := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &recDial{}
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, lnAddr)
+	releasePort()
 	client, err := proxy.SOCKS5("tcp", lnAddr, nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
@@ -109,13 +113,14 @@ func TestContextClosesBothSides(t *testing.T) {
 
 func TestUDPAssociateNotDialed(t *testing.T) {
 	t.Parallel()
-	lnAddr := freeAddr(t)
+	lnAddr, releasePort := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &recDial{}
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, lnAddr)
+	releasePort()
 
 	conn, err := net.Dial("tcp", lnAddr)
 	if err != nil {
@@ -150,13 +155,14 @@ func TestUDPAssociateNotDialed(t *testing.T) {
 
 func TestUsernamePasswordRejected(t *testing.T) {
 	t.Parallel()
-	lnAddr := freeAddr(t)
+	lnAddr, releasePort := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &recDial{}
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, lnAddr)
+	releasePort()
 
 	conn, err := net.Dial("tcp", lnAddr)
 	if err != nil {
@@ -180,12 +186,13 @@ func TestUsernamePasswordRejected(t *testing.T) {
 
 func TestCancelUnblocksIdleConn(t *testing.T) {
 	t.Parallel()
-	lnAddr := freeAddr(t)
+	lnAddr, releasePort := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ctx, &recDial{}) }()
 	waitListen(t, lnAddr)
+	releasePort()
 	conn, err := net.Dial("tcp", lnAddr)
 	if err != nil {
 		t.Fatal(err)
@@ -218,15 +225,27 @@ func TestRejectsNonLoopback(t *testing.T) {
 	}
 }
 
-func freeAddr(t *testing.T) string {
+// bindMu закрывает зазор «Listen(:0) отпустил порт — Serve ещё не занял его».
+// Иначе соседний t.Parallel в этом процессе забирает тот же номер.
+var bindMu sync.Mutex
+
+func freeAddr(t *testing.T) (string, func()) {
 	t.Helper()
+	bindMu.Lock()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		bindMu.Unlock()
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	if err := ln.Close(); err != nil {
+		bindMu.Unlock()
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(bindMu.Unlock) }
+	t.Cleanup(release)
+	return addr, release
 }
 
 func waitListen(t *testing.T, addr string) {

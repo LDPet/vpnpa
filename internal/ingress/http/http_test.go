@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,13 +30,14 @@ func (r *recDial) DialContext(_ context.Context, _, address string) (net.Conn, e
 
 func TestHostnameForwarded(t *testing.T) {
 	t.Parallel()
-	addr := freeAddr(t)
+	addr, releasePort := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &recDial{}
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, addr)
+	releasePort()
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -76,12 +78,13 @@ func TestHostnameForwarded(t *testing.T) {
 
 func TestDialErrorIsBadGateway(t *testing.T) {
 	t.Parallel()
-	addr := freeAddr(t)
+	addr, releasePort := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = srv.Serve(ctx, &recDial{err: io.EOF}) }()
 	waitListen(t, addr)
+	releasePort()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -100,12 +103,13 @@ func TestDialErrorIsBadGateway(t *testing.T) {
 
 func TestContextClosesBothSides(t *testing.T) {
 	t.Parallel()
-	addr := freeAddr(t)
+	addr, releasePort := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &recDial{}
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, addr)
+	releasePort()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -129,13 +133,14 @@ func TestContextClosesBothSides(t *testing.T) {
 
 func TestGETDoesNotDial(t *testing.T) {
 	t.Parallel()
-	addr := freeAddr(t)
+	addr, releasePort := freeAddr(t)
 	d := &recDial{}
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = srv.Serve(ctx, d) }()
 	waitListen(t, addr)
+	releasePort()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -159,12 +164,13 @@ func TestGETDoesNotDial(t *testing.T) {
 
 func TestCancelUnblocksIdleConn(t *testing.T) {
 	t.Parallel()
-	addr := freeAddr(t)
+	addr, releasePort := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ctx, &recDial{}) }()
 	waitListen(t, addr)
+	releasePort()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -197,15 +203,27 @@ func TestRejectsNonLoopback(t *testing.T) {
 	}
 }
 
-func freeAddr(t *testing.T) string {
+// bindMu закрывает зазор «Listen(:0) отпустил порт — Serve ещё не занял его».
+// Иначе соседний t.Parallel в этом процессе забирает тот же номер.
+var bindMu sync.Mutex
+
+func freeAddr(t *testing.T) (string, func()) {
 	t.Helper()
+	bindMu.Lock()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		bindMu.Unlock()
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	if err := ln.Close(); err != nil {
+		bindMu.Unlock()
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(bindMu.Unlock) }
+	t.Cleanup(release)
+	return addr, release
 }
 
 func waitListen(t *testing.T, addr string) {
