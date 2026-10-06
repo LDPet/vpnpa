@@ -1,0 +1,34 @@
+version: 2
+
+project_name: vpnpa
+
+builds:
+  - id: vpnpa
+    main: ./cmd/vpnpa
+    binary: vpnpa
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - id: bin
+    formats: [binary]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: SHA256SUMS
+
+changelog:
+  disable: true
+
+release:
+  extra_files:
+    - glob: install.sh
