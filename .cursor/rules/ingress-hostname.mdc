@@ -1,0 +1,9 @@
+---
+description: ingress передаёт hostname как есть и не резолвит его
+globs: internal/ingress/**/*.go
+alwaysApply: false
+---
+
+SOCKS5 (`atyp` `0x03` в `readAddr`) и HTTP CONNECT (`connectTarget`) передают hostname в `DialContext` как есть. `net.LookupIP`, `Resolver` и подмена имени на IP во входе запрещены. DNS делает бэкенд: у AmneziaWG это DNS из ссылки, у чужого SOCKS — тот процесс.
+
+Цель HTTP — request target, не отдельный резолв заголовка `Host`. Если клиент SOCKS уже прислал IP (`atyp` `0x01`/`0x04`), вход этот IP не переписывает.

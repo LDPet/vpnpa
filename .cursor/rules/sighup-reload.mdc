@@ -1,0 +1,9 @@
+---
+description: SIGHUP не переподнимает бэкенд с тем же id, type и uri
+globs: internal/app/**/*.go
+alwaysApply: false
+---
+
+`SIGHUP` вызывает `App.Reload`. В `upAll` запись с тем же `id`, тем же `uri` и тем же `type` (`old.uri == spec.URI && old.typ == spec.Type`) остаётся тем же `tracked`: `Up`/`Down` нет, меняется только priority (`setPriority`).
+
+Смена `uri` или `type` — `swap`: новый `Up`, старый `Down`. Снятый id гасит `dropMissing`. Текущий id в `sticky.SetBackends` сохраняется, пока он ещё в списке и `selectable`. Ошибка `Reload` откатывает новые `Up` этого прохода (`abort`) и не вызывает `Down` у прежних.

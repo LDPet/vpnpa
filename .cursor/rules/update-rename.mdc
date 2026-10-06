@@ -1,0 +1,9 @@
+---
+description: update заменяет бинарник через временный файл и rename
+globs: internal/cli/update.go,install.sh
+alwaysApply: false
+---
+
+`vpnpa update` (`updateExe`) не пишет в исполняемый файл. Релиз скачивается в `os.CreateTemp(dir, ".vpnpa-update-*")` в том же каталоге, сверяется sha256, ставится mode `0755`, затем `os.Rename` на путь бинарника. Прямая запись в запущенный файл на Linux даёт `ETXTBSY`.
+
+Если `vpnpa.service` в состоянии `active`, после `rename` идёт `systemctl --user restart vpnpa.service`. Сборка релиза — только linux/amd64 и linux/arm64. `install.sh` кладёт бинарник так же: `mktemp` в каталоге назначения и `rename`.

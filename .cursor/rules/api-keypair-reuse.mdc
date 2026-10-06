@@ -1,0 +1,9 @@
+---
+description: API-пара для vpn:// переиспользуется из state/keys
+globs: internal/backend/amneziawg/**/*.go
+alwaysApply: false
+---
+
+`vpn://` с `api_endpoint` и `api_key` (`IsAPI`) на `Up` берёт X25519-пару из `<stateDir>/keys/<id>` (`loadOrCreateKey`). В файле лежит `uri_hash` (sha256 uri). Пока hash совпал — та же пара и тот же `uuid`. Другой uri у этого id заменяет файл новой парой.
+
+`Down` файл ключа не удаляет. Без `stateDir` API-ссылка не поднимается. Запрос к API есть на `Up`, на `DialContext` его нет. Файл — `0600`, каталог `keys` — `0700`, запись через временный файл и `rename`.

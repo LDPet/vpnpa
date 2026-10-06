@@ -1,0 +1,11 @@
+---
+description: sticky не делает Down/Up текущего бэкенда из-за пробы
+globs: internal/balance/sticky/**/*.go
+alwaysApply: false
+---
+
+Текущий бэкенд из-за пробы не закрывается. В `apply` при `becameDead` `Down`/`Up` ставится в очередь только если `!isCurrent`. `restart` сразу выходит, если этот id всё ещё текущий.
+
+Бывший текущий получает `nextRestart = now + restart_interval` и переподнимается только после этого интервала, уже не будучи текущим. Не текущий мёртвый бэкенд: один `Down`+`Up` на пороге, следующий — когда интервал истёк. Повтор в том же цикле нельзя: `restarting` и `nextRestart` резервируются до `Down`.
+
+Ошибка `DialContext` выбор не меняет, только `requestProbe`. Выздоровевший с большим `priority` текущий не вытесняет: `reselectLocked` оставляет текущего, пока `selectableLocked`.
