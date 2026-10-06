@@ -9,6 +9,7 @@ import (
 )
 
 func TestRedactKeepsHelpAndHidesSecrets(t *testing.T) {
+	t.Parallel()
 	help := "использование: vpnpa add [--id name] 'vpn://...'"
 	if got := Redact(help); got != help {
 		t.Fatalf("help changed: %q", got)
@@ -30,6 +31,7 @@ func TestRedactKeepsHelpAndHidesSecrets(t *testing.T) {
 }
 
 func TestLoggerHidesSecrets(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	log := New(&buf, "debug", "text")
 	log.Warn("битая ссылка", "err", errors.New("vpn://"+strings.Repeat("B", 24)), "endpoint", "203.0.113.10:51820")

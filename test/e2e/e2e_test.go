@@ -34,6 +34,10 @@ import (
 	"github.com/LDPet/vpnpa/internal/config"
 )
 
+// TestE2EFailoverAndSignal и TestE2EAPIConfig остаются последовательными:
+// каждый поднимает userspace AmneziaWG на 127.0.0.1. UDP-порт берётся через
+// Listen, сразу закрывается и снова занимается IpcSet — параллельный прогон
+// делит этот зазор, а изолировать пиров без смены схемы портов нельзя.
 func TestE2EFailoverAndSignal(t *testing.T) {
 	peer1 := startPeer(t, "peer-1")
 	peer2 := startPeer(t, "peer-2")

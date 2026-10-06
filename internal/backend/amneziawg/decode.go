@@ -102,10 +102,8 @@ func EncodeRawJSON(jsonBody []byte) string {
 func qCompress(data []byte) []byte {
 	var buf bytes.Buffer
 	var hdr [4]byte
-	hdr[0] = byte(len(data) >> 24)
-	hdr[1] = byte(len(data) >> 16)
-	hdr[2] = byte(len(data) >> 8)
-	hdr[3] = byte(len(data))
+	// Заголовок Qt qCompress: длина несжатых данных, uint32 big-endian.
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(data))) // #nosec G115 -- формат хранит ровно 32 бита
 	buf.Write(hdr[:])
 	w := zlib.NewWriter(&buf)
 	_, _ = w.Write(data)

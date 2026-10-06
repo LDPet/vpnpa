@@ -28,6 +28,7 @@ func (r *recDial) DialContext(_ context.Context, _, address string) (net.Conn, e
 }
 
 func TestHostnameForwarded(t *testing.T) {
+	t.Parallel()
 	lnAddr := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -61,6 +62,7 @@ func TestHostnameForwarded(t *testing.T) {
 }
 
 func TestDialErrorBecomesClientError(t *testing.T) {
+	t.Parallel()
 	lnAddr := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,6 +80,7 @@ func TestDialErrorBecomesClientError(t *testing.T) {
 }
 
 func TestContextClosesBothSides(t *testing.T) {
+	t.Parallel()
 	lnAddr := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -105,6 +108,7 @@ func TestContextClosesBothSides(t *testing.T) {
 }
 
 func TestUDPAssociateNotDialed(t *testing.T) {
+	t.Parallel()
 	lnAddr := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -145,6 +149,7 @@ func TestUDPAssociateNotDialed(t *testing.T) {
 }
 
 func TestUsernamePasswordRejected(t *testing.T) {
+	t.Parallel()
 	lnAddr := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -174,6 +179,7 @@ func TestUsernamePasswordRejected(t *testing.T) {
 }
 
 func TestCancelUnblocksIdleConn(t *testing.T) {
+	t.Parallel()
 	lnAddr := freeAddr(t)
 	srv := New(lnAddr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -198,8 +204,10 @@ func TestCancelUnblocksIdleConn(t *testing.T) {
 }
 
 func TestRejectsNonLoopback(t *testing.T) {
+	t.Parallel()
 	for _, addr := range []string{"0.0.0.0:0", "1.2.3.4:1080", ":1080", "localhost:1080"} {
 		t.Run(addr, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			err := New(addr, slog.New(slog.DiscardHandler)).Serve(ctx, &recDial{})

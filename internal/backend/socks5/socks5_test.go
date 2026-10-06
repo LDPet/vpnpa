@@ -16,6 +16,7 @@ import (
 )
 
 func TestUpIsTCPAndDownLeavesProxy(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +55,7 @@ func TestUpIsTCPAndDownLeavesProxy(t *testing.T) {
 }
 
 func TestDialForwardsHostnameAndHidesPassword(t *testing.T) {
+	t.Parallel()
 	got := &capture{}
 	addr := serveSOCKS(t, "user", "p@ss", got)
 	var logs bytes.Buffer
@@ -98,6 +100,7 @@ func TestDialForwardsHostnameAndHidesPassword(t *testing.T) {
 }
 
 func TestNoAuthAndBadURI(t *testing.T) {
+	t.Parallel()
 	got := &capture{}
 	addr := serveSOCKS(t, "", "", got)
 	b, err := New(backend.Config{

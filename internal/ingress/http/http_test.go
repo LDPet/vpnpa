@@ -28,6 +28,7 @@ func (r *recDial) DialContext(_ context.Context, _, address string) (net.Conn, e
 }
 
 func TestHostnameForwarded(t *testing.T) {
+	t.Parallel()
 	addr := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -74,6 +75,7 @@ func TestHostnameForwarded(t *testing.T) {
 }
 
 func TestDialErrorIsBadGateway(t *testing.T) {
+	t.Parallel()
 	addr := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -97,6 +99,7 @@ func TestDialErrorIsBadGateway(t *testing.T) {
 }
 
 func TestContextClosesBothSides(t *testing.T) {
+	t.Parallel()
 	addr := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -125,6 +128,7 @@ func TestContextClosesBothSides(t *testing.T) {
 }
 
 func TestGETDoesNotDial(t *testing.T) {
+	t.Parallel()
 	addr := freeAddr(t)
 	d := &recDial{}
 	srv := New(addr, slog.New(slog.DiscardHandler))
@@ -154,6 +158,7 @@ func TestGETDoesNotDial(t *testing.T) {
 }
 
 func TestCancelUnblocksIdleConn(t *testing.T) {
+	t.Parallel()
 	addr := freeAddr(t)
 	srv := New(addr, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -178,8 +183,10 @@ func TestCancelUnblocksIdleConn(t *testing.T) {
 }
 
 func TestRejectsNonLoopback(t *testing.T) {
+	t.Parallel()
 	for _, addr := range []string{"0.0.0.0:0", "8.8.8.8:8080", ":8080", "localhost:8080"} {
 		t.Run(addr, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			err := New(addr, slog.New(slog.DiscardHandler)).Serve(ctx, &recDial{})

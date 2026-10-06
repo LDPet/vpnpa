@@ -20,6 +20,7 @@ import (
 )
 
 func TestDecodeQCompressAndRawJSON(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"dns1":"1.1.1.1","ok":true}`)
 	got, err := DecodeURI(EncodeURI(body))
 	if err != nil {
@@ -41,6 +42,7 @@ func TestDecodeQCompressAndRawJSON(t *testing.T) {
 }
 
 func TestParsePlaceholdersAndUAPI(t *testing.T) {
+	t.Parallel()
 	priv := bytes.Repeat([]byte{0x11}, 32)
 	pub := bytes.Repeat([]byte{0x22}, 32)
 	psk := bytes.Repeat([]byte{0x33}, 32)
@@ -111,6 +113,7 @@ func TestParsePlaceholdersAndUAPI(t *testing.T) {
 }
 
 func TestDecodeStdBase64WhitespaceAndLength(t *testing.T) {
+	t.Parallel()
 	body := []byte("\n{\"dns1\":\"1.1.1.1\",\"ok\":true}\n")
 	comp := qCompress(body)
 	std := base64.StdEncoding.EncodeToString(comp)
@@ -129,6 +132,7 @@ func TestDecodeStdBase64WhitespaceAndLength(t *testing.T) {
 }
 
 func TestLastConfigSuppliesMissingFields(t *testing.T) {
+	t.Parallel()
 	priv := bytes.Repeat([]byte{0x11}, 32)
 	pub := bytes.Repeat([]byte{0x22}, 32)
 	psk := bytes.Repeat([]byte{0x33}, 32)
@@ -189,6 +193,8 @@ func TestLastConfigSuppliesMissingFields(t *testing.T) {
 	}
 }
 
+// Последовательно: подменяет пакетный tunnelStarter. Рядом так же
+// TestAPIUpReusesPublicKey и TestUpWarnsOnRandomTrailers.
 func TestDialDoesNotCallAPI(t *testing.T) {
 	var posts int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +226,7 @@ func TestDialDoesNotCallAPI(t *testing.T) {
 }
 
 func TestStoredKeyModeRepaired(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	kp, err := loadOrCreateKey(dir, "id1", "vpn://same")
 	if err != nil {
@@ -246,6 +253,7 @@ func TestStoredKeyModeRepaired(t *testing.T) {
 }
 
 func TestDeviceLoggerQuietAndNoPacketDump(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	info := slog.New(slog.NewTextHandler(&buf, nil))
 	quiet := deviceLogger(info)
@@ -269,6 +277,7 @@ func TestDeviceLoggerQuietAndNoPacketDump(t *testing.T) {
 }
 
 func TestObfuscationFilledFromLastConfig(t *testing.T) {
+	t.Parallel()
 	priv := bytes.Repeat([]byte{0x11}, 32)
 	pub := bytes.Repeat([]byte{0x22}, 32)
 	last := map[string]any{
@@ -291,6 +300,7 @@ func TestObfuscationFilledFromLastConfig(t *testing.T) {
 	}
 }
 
+// Последовательно: подменяет пакетный tunnelStarter.
 func TestAPIUpReusesPublicKey(t *testing.T) {
 	priv := bytes.Repeat([]byte{0x11}, 32)
 	pub := bytes.Repeat([]byte{0x22}, 32)
@@ -366,6 +376,7 @@ func TestAPIUpReusesPublicKey(t *testing.T) {
 }
 
 func TestAPIBadResponse(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("not-a-config"))
 	}))
@@ -385,6 +396,7 @@ func TestAPIBadResponse(t *testing.T) {
 	}
 }
 
+// Последовательно: подменяет пакетный tunnelStarter.
 func TestUpWarnsOnRandomTrailers(t *testing.T) {
 	priv := bytes.Repeat([]byte{0x11}, 32)
 	pub := bytes.Repeat([]byte{0x22}, 32)

@@ -158,6 +158,7 @@ func healthy(t *testing.T, s *Sticky, n int) {
 }
 
 func TestStartPicksHighestPriority(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	low := &fake{id: "low", priority: 10}
 	high := &fake{id: "high", priority: 100}
@@ -169,6 +170,7 @@ func TestStartPicksHighestPriority(t *testing.T) {
 }
 
 func TestRecoveredHigherDoesNotPreempt(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	high := &fake{id: "high", priority: 100}
 	low := &fake{id: "low", priority: 10}
@@ -191,6 +193,7 @@ func TestRecoveredHigherDoesNotPreempt(t *testing.T) {
 }
 
 func TestSwitchOnlyAfterFailThreshold(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	high := &fake{id: "high", priority: 100}
 	low := &fake{id: "low", priority: 10}
@@ -210,6 +213,7 @@ func TestSwitchOnlyAfterFailThreshold(t *testing.T) {
 }
 
 func TestOneOfTwoURLsKeepsProbeSuccessful(t *testing.T) {
+	t.Parallel()
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -235,6 +239,7 @@ func TestOneOfTwoURLsKeepsProbeSuccessful(t *testing.T) {
 }
 
 func TestRecoverThreshold(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	opt.RecoverThreshold = 2
 	b := &fake{id: "b", priority: 1}
@@ -250,6 +255,7 @@ func TestRecoverThreshold(t *testing.T) {
 }
 
 func TestNoHealthyBackend(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	b := &fake{id: "b", priority: 1, failProbe: true}
 	s := New([]backend.Backend{b}, opt)
@@ -261,6 +267,7 @@ func TestNoHealthyBackend(t *testing.T) {
 }
 
 func TestUserDialErrorDoesNotSwitch(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	high := &fake{id: "high", priority: 100}
 	low := &fake{id: "low", priority: 10}
@@ -279,6 +286,7 @@ func TestUserDialErrorDoesNotSwitch(t *testing.T) {
 }
 
 func TestCurrentIsNotRestartedAtThreshold(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	high := &fake{id: "high", priority: 100}
 	low := &fake{id: "low", priority: 10}
@@ -297,6 +305,7 @@ func TestCurrentIsNotRestartedAtThreshold(t *testing.T) {
 }
 
 func TestNonCurrentRestartOnceThenInterval(t *testing.T) {
+	t.Parallel()
 	clock := time.Unix(1_700_000_000, 0)
 	opt, _ := testOpts(t)
 	opt.Now = func() time.Time { return clock }
@@ -327,6 +336,7 @@ func TestNonCurrentRestartOnceThenInterval(t *testing.T) {
 }
 
 func TestFormerCurrentRestartsOnlyAfterInterval(t *testing.T) {
+	t.Parallel()
 	clock := time.Unix(1_700_000_000, 0)
 	opt, _ := testOpts(t)
 	opt.Now = func() time.Time { return clock }
@@ -357,6 +367,7 @@ func TestFormerCurrentRestartsOnlyAfterInterval(t *testing.T) {
 }
 
 func TestSwitchLogHasIDsAndNoSecrets(t *testing.T) {
+	t.Parallel()
 	opt, buf := testOpts(t)
 	high := &fake{id: "high", priority: 100, endpoint: "vpn://SUPERSECRETKEY"}
 	low := &fake{id: "low", priority: 10, endpoint: "c2VjcmV0a2V5"}
@@ -378,6 +389,7 @@ func TestSwitchLogHasIDsAndNoSecrets(t *testing.T) {
 }
 
 func TestPreferFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := dir + "/prefer"
 	opt, _ := testOpts(t)
@@ -410,6 +422,7 @@ func TestPreferFile(t *testing.T) {
 }
 
 func TestEgressIPKeptOnFailure(t *testing.T) {
+	t.Parallel()
 	var fail bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if fail {
@@ -460,6 +473,7 @@ func writeFile(path, body string) error {
 }
 
 func TestDefaultCheckURLs(t *testing.T) {
+	t.Parallel()
 	s := New(nil, Options{})
 	want := []string{
 		"https://www.gstatic.com/generate_204",
@@ -476,6 +490,7 @@ func TestDefaultCheckURLs(t *testing.T) {
 }
 
 func TestCheckURLsReplaceTheList(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	opt.CheckURLs = []string{"tcp://" + probeAddr}
 	s := New(nil, opt)
@@ -485,6 +500,7 @@ func TestCheckURLsReplaceTheList(t *testing.T) {
 }
 
 func TestFirst204SkipsTheRest(t *testing.T) {
+	t.Parallel()
 	firstHits := 0
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		firstHits++
@@ -512,6 +528,7 @@ func TestFirst204SkipsTheRest(t *testing.T) {
 }
 
 func TestNon204IsFailure(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -529,6 +546,7 @@ func TestNon204IsFailure(t *testing.T) {
 }
 
 func TestSuccessResetsFailStreak(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	high := &fake{id: "high", priority: 100}
 	low := &fake{id: "low", priority: 10}
@@ -558,6 +576,7 @@ func TestSuccessResetsFailStreak(t *testing.T) {
 }
 
 func TestPreferSkipsUnhealthy(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := dir + "/prefer"
 	opt, _ := testOpts(t)
@@ -583,6 +602,7 @@ func TestPreferSkipsUnhealthy(t *testing.T) {
 }
 
 func TestDialErrorLogHasNoSecret(t *testing.T) {
+	t.Parallel()
 	opt, buf := testOpts(t)
 	high := &fake{id: "high", priority: 1}
 	s := New([]backend.Backend{high}, opt)
@@ -599,6 +619,7 @@ func TestDialErrorLogHasNoSecret(t *testing.T) {
 }
 
 func TestDialErrorRequestsOneProbe(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	opt.CheckInterval = time.Hour
 	opt.RecoverThreshold = 1
@@ -640,6 +661,7 @@ func TestDialErrorRequestsOneProbe(t *testing.T) {
 }
 
 func TestProbeDoesNotCloseUserConn(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	high := &fake{id: "high", priority: 100}
 	low := &fake{id: "low", priority: 10}
@@ -664,6 +686,7 @@ func TestProbeDoesNotCloseUserConn(t *testing.T) {
 }
 
 func TestSetBackendsRetargetsCurrent(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	opt.RecoverThreshold = 1
 	old := &fake{id: "vpn", priority: 100}
@@ -687,6 +710,7 @@ func TestSetBackendsRetargetsCurrent(t *testing.T) {
 }
 
 func TestStaleProbeDoesNotTouchReplacement(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	opt.RecoverThreshold = 1
 	opt.FailThreshold = 1
@@ -743,6 +767,7 @@ func TestStaleProbeDoesNotTouchReplacement(t *testing.T) {
 }
 
 func TestNeverAliveRestartsOnceUntilInterval(t *testing.T) {
+	t.Parallel()
 	clock := time.Unix(1_700_000_000, 0)
 	opt, _ := testOpts(t)
 	opt.Now = func() time.Time { return clock }
@@ -774,6 +799,7 @@ func TestNeverAliveRestartsOnceUntilInterval(t *testing.T) {
 }
 
 func TestEgressFailureDoesNotFailProbe(t *testing.T) {
+	t.Parallel()
 	var fail bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if fail {
@@ -805,6 +831,7 @@ func TestEgressFailureDoesNotFailProbe(t *testing.T) {
 }
 
 func TestNoHealthyDoesNotDialBackend(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	b := &fake{id: "b", priority: 1, failProbe: true}
 	s := New([]backend.Backend{b}, opt)
@@ -819,6 +846,7 @@ func TestNoHealthyDoesNotDialBackend(t *testing.T) {
 }
 
 func TestInitialSwitchReasonIsStart(t *testing.T) {
+	t.Parallel()
 	opt, buf := testOpts(t)
 	b := &fake{id: "only", priority: 1}
 	s := New([]backend.Backend{b}, opt)
@@ -829,6 +857,7 @@ func TestInitialSwitchReasonIsStart(t *testing.T) {
 }
 
 func TestConcurrentDialAndProbe(t *testing.T) {
+	t.Parallel()
 	opt, _ := testOpts(t)
 	opt.Logger = slog.New(slog.DiscardHandler)
 	high := &fake{id: "high", priority: 100}

@@ -12,6 +12,7 @@ import (
 )
 
 func TestInstallScript(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("install.sh supports linux")
 	}
@@ -21,6 +22,7 @@ func TestInstallScript(t *testing.T) {
 	hash := hex.EncodeToString(sum[:])
 
 	t.Run("rejects root", func(t *testing.T) {
+		t.Parallel()
 		home := t.TempDir()
 		bin := t.TempDir()
 		writeFake(t, bin, "id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo 0; exit 0; fi\nexit 1\n")
@@ -39,6 +41,7 @@ func TestInstallScript(t *testing.T) {
 	})
 
 	t.Run("rejects other os and arch", func(t *testing.T) {
+		t.Parallel()
 		home := t.TempDir()
 		bin := t.TempDir()
 		writeFake(t, bin, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo Darwin; exit 0; fi\nif [ \"$1\" = \"-m\" ]; then echo x86_64; exit 0; fi\nexit 1\n")
@@ -64,6 +67,7 @@ func TestInstallScript(t *testing.T) {
 	})
 
 	t.Run("installs verifies and does not touch config", func(t *testing.T) {
+		t.Parallel()
 		home := t.TempDir()
 		bin, fix := scriptFakes(t, payload, hash, "")
 		cfgDir := filepath.Join(home, ".config", "vpnpa")
@@ -132,6 +136,7 @@ func TestInstallScript(t *testing.T) {
 	})
 
 	t.Run("second run restarts only an active service", func(t *testing.T) {
+		t.Parallel()
 		home := t.TempDir()
 		bin, fix := scriptFakes(t, payload, hash, "active")
 		log := filepath.Join(home, "log")
@@ -168,6 +173,7 @@ func TestInstallScript(t *testing.T) {
 	})
 
 	t.Run("inactive service is not restarted", func(t *testing.T) {
+		t.Parallel()
 		home := t.TempDir()
 		bin, fix := scriptFakes(t, payload, hash, "inactive")
 		log := filepath.Join(home, "log")
@@ -193,6 +199,7 @@ func TestInstallScript(t *testing.T) {
 	})
 
 	t.Run("bad checksum does not replace", func(t *testing.T) {
+		t.Parallel()
 		home := t.TempDir()
 		bin, fix := scriptFakes(t, payload, strings.Repeat("ab", 32), "")
 		dest := filepath.Join(home, ".local", "bin", "vpnpa")
@@ -218,6 +225,7 @@ func TestInstallScript(t *testing.T) {
 	})
 
 	t.Run("does not follow redirect off github", func(t *testing.T) {
+		t.Parallel()
 		home := t.TempDir()
 		bin, fix := scriptFakes(t, payload, hash, "")
 		curlLog := filepath.Join(home, "curl.log")

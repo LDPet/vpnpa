@@ -88,6 +88,7 @@ func (f *fake) stats() (users, downs int) {
 }
 
 func TestSOCKSFailoverKeepsOldStream(t *testing.T) {
+	t.Parallel()
 	echo := startEcho(t)
 	high := &fake{id: "high", prio: 100, echo: echo}
 	low := &fake{id: "low", prio: 50, echo: echo}
@@ -170,6 +171,7 @@ func TestSOCKSFailoverKeepsOldStream(t *testing.T) {
 }
 
 func TestBothDeadSOCKSErrors(t *testing.T) {
+	t.Parallel()
 	echo := startEcho(t)
 	a := &fake{id: "a", prio: 100, echo: echo}
 	b := &fake{id: "b", prio: 50, echo: echo}
@@ -216,6 +218,7 @@ func TestBothDeadSOCKSErrors(t *testing.T) {
 }
 
 func TestUserDialErrorDoesNotMoveTraffic(t *testing.T) {
+	t.Parallel()
 	echo := startEcho(t)
 	high := &fake{id: "high", prio: 100, echo: echo}
 	low := &fake{id: "low", prio: 50, echo: echo}
