@@ -1,8 +1,21 @@
 name: ci
 
+# Push ветки проверяется через pull_request, push в main — после мержа,
+# push тега — тот же набор проверок и только потом публикация.
 on:
   push:
+    branches: [main]
+    tags: ["**"]
   pull_request:
+
+permissions:
+  contents: read
+
+# Повторный push в тот же PR отменяет предыдущий прогон.
+# Тег и main не отменяются: релиз не должен оборваться на полпути.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -55,7 +68,10 @@ jobs:
 
   release:
     name: release
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, lint, e2e, vuln]
+    # Свой if заменяет неявный success(). Без success() GoReleaser
+    # стартовал бы и после красных проверок.
+    if: startsWith(github.ref, 'refs/tags/') && success()
     runs-on: ubuntu-latest
     permissions:
       contents: write
