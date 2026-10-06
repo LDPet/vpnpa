@@ -1,5 +1,11 @@
 package cli
 
+// Файл update.go заменяет бинарник vpnpa через rename в том же каталоге.
+// Скачанный файл сверяется с SHA256SUMS до подмены. Пока хеш не сошёлся,
+// текущий exe не трогается. На Linux rename поверх запущенного файла
+// оставляет процесс на старом inode, а новый путь указывает на новый файл;
+// systemctl restart подхватывает его, и только если сервис уже active.
+
 import (
 	"context"
 	"crypto/sha256"
@@ -24,6 +30,8 @@ const (
 	maxSumsBytes   = 1 << 20
 )
 
+// cmdUpdate качает релиз linux/amd64 или linux/arm64 с GitHub и подменяет
+// текущий исполняемый файл. Симлинк разворачивается: меняется сам файл, не ссылка.
 func cmdUpdate(ctx context.Context, run Runner, stdout, stderr io.Writer) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -43,7 +51,8 @@ func defaultReleaseClient() *http.Client {
 	}
 }
 
-// releaseRedirect refuses hops that leave the GitHub release hosts or https.
+// releaseRedirect отвергает переход, который уходит с хостов релиза GitHub
+// или с https. Иначе редирект мог бы скачать бинарник откуда угодно.
 func releaseRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("слишком много перенаправлений")
@@ -51,6 +60,11 @@ func releaseRedirect(req *http.Request, via []*http.Request) error {
 	return validateReleaseURL(req.URL)
 }
 
+// updateExe пишет бинарник во временный файл рядом с exe, сверяет sha256,
+// ставит 0755 и только потом делает rename поверх exe. Временный файл в том
+// же каталоге нужен, чтобы rename был атомарен и не пересекал файловые системы.
+// Каталог синхронизируется следом. Неуспех до rename удаляет временный файл.
+// Рестарт user unit выполняется лишь когда `is-active` ответил active.
 func updateExe(ctx context.Context, client *http.Client, base, exe string, policy func(*url.URL) error, run Runner, stdout, stderr io.Writer) error {
 	asset, err := releaseAsset()
 	if err != nil {
@@ -106,6 +120,8 @@ func updateExe(ctx context.Context, client *http.Client, base, exe string, polic
 	if err := f.Close(); err != nil {
 		return err
 	}
+	// Подмена по имени. Живой процесс продолжает исполнять старый inode
+	// (ядро помечает exe как deleted). Следующий старт откроет уже новый файл.
 	if err := os.Rename(tmp, exe); err != nil {
 		return err
 	}
@@ -266,6 +282,8 @@ func redactURL(u *url.URL) string {
 	return c.String()
 }
 
+// validateReleaseURL пускает только https на хосты релизов GitHub
+// и отвергает userinfo, loopback, частные и link-local адреса.
 func validateReleaseURL(u *url.URL) error {
 	if u == nil {
 		return errors.New("пустой адрес релиза")

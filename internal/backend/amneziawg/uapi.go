@@ -4,8 +4,14 @@ import (
 	"strings"
 )
 
-// BuildUAPI renders the device configuration. Secrets stay in the returned
-// string; callers that log it must pass the result through RedactUAPI.
+// BuildUAPI собирает текст IPC amneziawg-go: строки key=value и перевод строки.
+// Устройство читает его через IpcSet, отдельного файла конфигурации нет.
+// Пустые поля пропускаются, чтобы не затереть умолчания библиотеки.
+//
+// Порядок как у UAPI: сначала устройство (private_key и параметры обфускации
+// AWG 3.1: jc/jmin/jmax, s1–s4, h1–h4, i1–i5, header_protection_key), затем
+// пир (public_key, preshared_key, endpoint, allowed_ip).
+// Секреты остаются в строке; в лог её можно отдать только через RedactUAPI.
 func BuildUAPI(t Tunnel) string {
 	var b strings.Builder
 	line := func(key, val string) {
@@ -57,7 +63,9 @@ func BuildUAPI(t Tunnel) string {
 	return b.String()
 }
 
-// RedactUAPI hides key material before a debug log line.
+// RedactUAPI подменяет материал ключей перед debug-логом.
+// endpoint, диапазоны H/S и прочие параметры обфускации остаются: по ним
+// видно, что именно ушло в устройство, но не сам ключ.
 func RedactUAPI(uapi string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(uapi, "\n") {

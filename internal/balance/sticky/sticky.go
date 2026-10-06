@@ -1,6 +1,10 @@
-// Package sticky keeps user traffic on one live backend until that backend
-// fails its probe threshold. A recovered higher-priority backend does not
-// take over by itself.
+// Package sticky держит трафик на одном живом бэкенде, пока тот не провалит
+// порог проб. Оживший бэкенд с большим приоритетом сам место не занимает.
+//
+// Текущий бэкенд проба не гасит и не поднимает заново: Down/Up по
+// restart_interval делается только у того, кто уже не текущий. Проба
+// успешна, если хотя бы один URL из пары (или из check_urls) ответил 204.
+// Файл prefer перечитывается на каждом цикле и может прибить выбор к id.
 package sticky
 
 import (
@@ -25,24 +29,40 @@ import (
 	"github.com/LDPet/vpnpa/internal/logx"
 )
 
-// Options configures the probe loop. Zero values are replaced with defaults.
+// Options задаёт цикл проб. Нулевые числа заменяются умолчаниями в New.
 type Options struct {
-	CheckInterval    time.Duration
-	CheckTimeout     time.Duration
-	FailThreshold    int
+	// CheckInterval — пауза между полными обходами всех бэкендов.
+	CheckInterval time.Duration
+	// CheckTimeout — сколько ждать одну пробу, включая TLS.
+	CheckTimeout time.Duration
+	// FailThreshold — подряд неудачных проб, после которых живой бэкенд становится мёртвым.
+	FailThreshold int
+	// RecoverThreshold — подряд удачных проб, после которых мёртвый снова живой.
 	RecoverThreshold int
-	RestartInterval  time.Duration
-	CheckURLs        []string
-	EgressURL        string
-	EgressInterval   time.Duration
-	PreferPath       string
-	Logger           *slog.Logger
-	OnStatus         func(Status)
-	// Now overrides the clock used for restart_interval. Tests advance it.
+	// RestartInterval — как часто делать Down+Up нетекущему мёртвому бэкенду.
+	// Текущего это не касается: его проба не закрывает.
+	RestartInterval time.Duration
+	// CheckURLs пробуются по порядку. Первый ответ HTTP 204 (или успешный tcp)
+	// делает пробу успешной, остальные в этом цикле не вызываются.
+	// Пустой список в New заменяется парой generate_204. Непустой список
+	// заменяет умолчание целиком, а не дополняет его.
+	CheckURLs []string
+	// EgressURL — откуда читать внешний IP текущего бэкенда. Сбой этого
+	// запроса пробу не валит.
+	EgressURL string
+	// EgressInterval — как часто обновлять внешний IP.
+	EgressInterval time.Duration
+	// PreferPath перечитывается на каждом цикле. "auto" или пусто — обычные
+	// правила. Иначе id, если этот бэкенд жив и сейчас не в Down/Up.
+	PreferPath string
+	Logger     *slog.Logger
+	// OnStatus вызывается после смены снимка. Демон пишет им status.json.
+	OnStatus func(Status)
+	// Now подменяет часы restart_interval. Тесты двигают время сами.
 	Now func() time.Time
 }
 
-// BackendStatus is one row of the status file.
+// BackendStatus — одна строка status.json.
 type BackendStatus struct {
 	ID       string `json:"id"`
 	Priority int    `json:"priority"`
@@ -50,7 +70,8 @@ type BackendStatus struct {
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
-// Status is what vpnpa status prints.
+// Status — снимок, который печатает `vpnpa status` и пишет демон.
+// Current пуст, когда живого бэкенда нет: трафик в этом состоянии наружу не идёт.
 type Status struct {
 	Listen     string          `json:"listen,omitempty"`
 	HTTPListen string          `json:"http_listen,omitempty"`
@@ -60,21 +81,25 @@ type Status struct {
 	Backends   []BackendStatus `json:"backends"`
 }
 
+// health — счётчики одного id. alive переключается только порогами,
+// не одной пробой. nextRestart — момент, когда нетекущему мёртвому
+// разрешён один Down+Up. restarting стоит на время этого Down/Up:
+// иначе проба успеет выбрать бэкенд и тут же закроет его под трафиком.
 type health struct {
 	alive       bool
 	okStreak    int
 	failStreak  int
 	nextRestart time.Time
-	// restarting is set while Down/Up of a non-current backend is in progress
-	// so a probe cannot select that backend and then close it.
-	restarting bool
+	restarting  bool
 }
 
 type currentBox struct {
 	b backend.Backend
 }
 
-// Sticky implements dialer.Dialer over a fixed set of backends.
+// Sticky реализует dialer.Dialer поверх набора бэкендов.
+// DialContext читает atomic-указатель currentBox, а не поле current под мьютексом:
+// выбор можно опубликовать, не блокируя каждое пользовательское соединение.
 type Sticky struct {
 	opt Options
 
@@ -91,7 +116,9 @@ type Sticky struct {
 	kick chan struct{}
 }
 
-// New builds a balancer. Backends are not constructed here.
+// New собирает балансировщик. Бэкенды здесь не создаются и не поднимаются:
+// их Up уже сделал вызывающий. Пустой CheckURLs заменяется парой
+// generate_204 (gstatic и cloudflare). Непустой список используется как есть.
 func New(backends []backend.Backend, opt Options) *Sticky {
 	if opt.CheckInterval <= 0 {
 		opt.CheckInterval = 15 * time.Second
@@ -108,9 +135,9 @@ func New(backends []backend.Backend, opt Options) *Sticky {
 	if opt.RestartInterval <= 0 {
 		opt.RestartInterval = 5 * time.Minute
 	}
-	// Copy so a later mutation of the caller's slice cannot race with probes.
-	// An empty list is the default pair: check_urls replaces the list only
-	// when the caller actually provides URLs.
+	// Копия, чтобы последующая правка среза вызывающего не гонялась с пробами.
+	// Пустой список — пара по умолчанию. check_urls подменяет список только
+	// когда вызывающий действительно передал URL.
 	opt.CheckURLs = append([]string(nil), opt.CheckURLs...)
 	if len(opt.CheckURLs) == 0 {
 		opt.CheckURLs = []string{
@@ -138,7 +165,8 @@ func New(backends []backend.Backend, opt Options) *Sticky {
 	return s
 }
 
-// Run probes until ctx is cancelled. The first cycle runs immediately.
+// Run пробует бэкенды, пока ctx не отменён. Первый цикл выполняется сразу,
+// не дожидаясь тикера, чтобы трафик не ждал check_interval после старта.
 func (s *Sticky) Run(ctx context.Context) {
 	s.cycle(ctx)
 	s.refreshEgress(ctx)
@@ -160,8 +188,10 @@ func (s *Sticky) Run(ctx context.Context) {
 	}
 }
 
-// SetBackends swaps the list used by later cycles. An unchanged instance
-// keeps its health. The current id is kept when it is still present and alive.
+// SetBackends подменяет список для следующих циклов. Тот же экземпляр
+// (тот же указатель) сохраняет здоровье и серии. Текущий id остаётся,
+// если он ещё в списке и жив. Вызывается после SIGHUP: app передаёт те же
+// tracked-указатели для неизменных URI, поэтому Down/Up им не нужен.
 func (s *Sticky) SetBackends(list []backend.Backend) {
 	s.mu.Lock()
 	s.setBackendsLocked(list)
@@ -179,8 +209,8 @@ func (s *Sticky) setBackendsLocked(list []backend.Backend) {
 		order = append(order, b)
 		old, ok := s.byID[b.ID()]
 		if !ok || old != b {
-			// A replaced instance keeps "alive" so the current id stays
-			// selected, but streaks start over: it is a new tunnel.
+			// Новый экземпляр того же id сохраняет alive, чтобы текущий выбор
+			// не сбросился на перезагрузке, но серии обнуляются: туннель другой.
 			keep := false
 			if ok {
 				if h := s.health[b.ID()]; h != nil {
@@ -207,8 +237,9 @@ func (s *Sticky) setBackendsLocked(list []backend.Backend) {
 	s.publishLocked(s.current)
 }
 
-// DialContext sends the connection to the current backend only.
-// A dial error does not change the selection; it requests an extra probe.
+// DialContext отправляет соединение только в текущий бэкенд.
+// Ошибка dial выбор не меняет: одна ошибка пользователя — не повод бросить
+// туннель. Она лишь просит внеочередную пробу текущего.
 func (s *Sticky) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	box := s.ptr.Load()
 	if box == nil || box.b == nil {
@@ -233,7 +264,7 @@ func (s *Sticky) DialContext(ctx context.Context, network, address string) (net.
 	return c, nil
 }
 
-// Snapshot returns a copy of the published state.
+// Snapshot возвращает копию опубликованного состояния.
 func (s *Sticky) Snapshot() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,8 +330,8 @@ func (s *Sticky) cycle(ctx context.Context) {
 		}(i, b)
 	}
 	wg.Wait()
-	// A cancelled run must not record timeouts as real failures: that would
-	// restart tunnels while the process is stopping.
+	// Отменённый цикл не записывает таймауты как настоящие провалы:
+	// иначе остановка процесса перезапускала бы туннели.
 	if ctx.Err() != nil {
 		return
 	}
@@ -323,8 +354,8 @@ func (s *Sticky) apply(ctx context.Context, results []probeResult) {
 	}
 	var jobs []job
 	for _, r := range results {
-		// A probe started before SetBackends belongs to the old instance.
-		// Applying it would mark the replacement unhealthy or Up the removed tunnel.
+		// Проба, начатая до SetBackends, принадлежит старому экземпляру.
+		// Применить её — пометить замену мёртвой или поднять уже снятый туннель.
 		if cur, ok := s.byID[r.b.ID()]; !ok || cur != r.b {
 			continue
 		}
@@ -349,8 +380,10 @@ func (s *Sticky) apply(ctx context.Context, results []probeResult) {
 		if becameDead {
 			s.opt.Logger.Info("бэкенд нежив", "backend", r.b.ID(), "priority", r.b.Priority())
 			isCurrent := isCurrentID(s.current, r.b.ID())
-			// The current backend is not closed by a probe. restart_interval
-			// applies only after it is no longer current.
+			// Проба текущий бэкенд не закрывает. Интервал отсчитывается сейчас,
+			// но Down+Up встанет в очередь только если он уже не текущий.
+			// Если он ещё текущий, reselect ниже уйдёт с него (если есть замена),
+			// а переподъём случится на следующем цикле, когда nextRestart наступит.
 			h.nextRestart = s.now().Add(s.opt.RestartInterval)
 			if !isCurrent && !h.restarting {
 				jobs = append(jobs, job{b: r.b})
@@ -381,8 +414,8 @@ func (s *Sticky) restartDue(t time.Time) bool {
 	return !t.IsZero() && !s.now().Before(t)
 }
 
-// restartWantedLocked reports whether a non-current unhealthy backend is due
-// for its single Down+Up. The current backend is never included.
+// restartWantedLocked говорит, пора ли нетекущему мёртвому бэкенду сделать
+// один Down+Up. Текущий сюда не попадает никогда.
 func (s *Sticky) restartWantedLocked(h *health, id string) bool {
 	if h == nil || h.alive || h.restarting || isCurrentID(s.current, id) {
 		return false
@@ -393,7 +426,7 @@ func (s *Sticky) restartWantedLocked(h *health, id string) bool {
 	return h.nextRestart.IsZero() || s.restartDue(h.nextRestart)
 }
 
-// ProbeNow runs a single probe cycle. The background Run loop is not required.
+// ProbeNow выполняет один цикл проб. Фоновый Run для этого не нужен.
 func (s *Sticky) ProbeNow(ctx context.Context) {
 	s.cycle(ctx)
 }
@@ -426,15 +459,15 @@ func (s *Sticky) restart(ctx context.Context, b backend.Backend) {
 		return
 	}
 	h.restarting = true
-	// Reserve the interval before Down so a concurrent cycle cannot queue
-	// another restart of the same backend.
+	// Интервал занимается до Down, чтобы соседний цикл не поставил
+	// второй переподъём того же бэкенда.
 	if h.nextRestart.IsZero() || s.restartDue(h.nextRestart) {
 		h.nextRestart = s.now().Add(s.opt.RestartInterval)
 	}
 	s.mu.Unlock()
 
-	// finished is set once this call has cleared the flag itself. The defer
-	// covers every earlier return and must not clear a newer restart.
+	// finished ставится, когда этот вызов сам снял флаг. defer закрывает
+	// ранние выходы и не должен сбрасывать уже новый переподъём.
 	finished := false
 	defer func() {
 		if finished {
@@ -451,8 +484,8 @@ func (s *Sticky) restart(ctx context.Context, b backend.Backend) {
 	if err := b.Down(ctx); err != nil {
 		s.opt.Logger.Warn("ошибка остановки бэкенда", "backend", b.ID(), "err", safeErr(err))
 	}
-	// The instance may have been replaced while Down ran. Up of the removed
-	// tunnel would bring back a device the process already dropped.
+	// Пока шёл Down, экземпляр могли заменить (SIGHUP). Up снятого туннеля
+	// вернул бы устройство, которое процесс уже отпустил.
 	s.mu.Lock()
 	same := s.sameInstanceLocked(b)
 	s.mu.Unlock()
@@ -462,8 +495,8 @@ func (s *Sticky) restart(ctx context.Context, b backend.Backend) {
 	if err := b.Up(ctx); err != nil {
 		s.opt.Logger.Warn("ошибка поднятия бэкенда", "backend", b.ID(), "err", safeErr(err))
 	}
-	// Up can block on the network. Reload may have swapped the instance
-	// while it ran; the old device must not stay up beside the new one.
+	// Up может ждать сеть. Reload за это время мог подменить экземпляр;
+	// старое устройство не должно остаться поднятым рядом с новым.
 	s.mu.Lock()
 	same = s.sameInstanceLocked(b)
 	s.mu.Unlock()
@@ -494,9 +527,9 @@ func (s *Sticky) restart(ctx context.Context, b backend.Backend) {
 		s.opt.Logger.Info("бэкенд жив", "backend", b.ID(), "priority", b.Priority())
 	}
 	s.logProbe(probeResult{b: b, ok: ok, latency: time.Since(start)}, h)
-	// Clear the flag before reselect so a recovered backend can be chosen
-	// when nothing else is alive. It was not current, so this cannot close
-	// the tunnel that was serving user traffic.
+	// Флаг снимается до reselect, чтобы оживший бэкенд мог быть выбран,
+	// когда живых больше нет. Текущим он не был, поэтому это не закрывает
+	// туннель, который нёс пользовательский трафик.
 	h.restarting = false
 	finished = true
 	s.reselectLocked("probe")
@@ -525,6 +558,10 @@ func (s *Sticky) probeCurrent(ctx context.Context) {
 	s.apply(ctx, []probeResult{{b: b, ok: ok, latency: time.Since(start)}})
 }
 
+// reselectLocked выбирает, куда слать новые соединения.
+// Порядок: живой prefer (если не "auto"), иначе прежний текущий, если он
+// ещё выбираем, иначе живой с наибольшим приоритетом. Оживший «более важный»
+// бэкенд текущий не вытесняет — для этого есть файл prefer.
 func (s *Sticky) reselectLocked(why string) {
 	prefer := s.prefer
 	if prefer == "" {
@@ -559,8 +596,8 @@ func (s *Sticky) assignLocked(next backend.Backend, reason string) {
 	from := idOf(s.current)
 	to := idOf(next)
 	s.current = next
-	// Always publish the concrete value. Same id can be a new instance;
-	// DialContext reads this pointer, not s.current.
+	// Публикуется конкретный указатель. Тот же id может быть новым экземпляром,
+	// а DialContext читает этот указатель, не поле current.
 	s.publishLocked(next)
 	if from == to {
 		return
@@ -589,8 +626,8 @@ func (s *Sticky) publishLocked(next backend.Backend) {
 
 func (s *Sticky) selectableLocked(id string) bool {
 	h := s.health[id]
-	// restarting backends are mid Down/Up. Selecting one would point new
-	// dials at a device the probe is about to close.
+	// Бэкенд с restarting посреди Down/Up. Выбрать его — направить новые
+	// dial в устройство, которое проба сейчас закрывает.
 	return h != nil && h.alive && !h.restarting
 }
 
@@ -607,6 +644,8 @@ func (s *Sticky) highestSelectableLocked() backend.Backend {
 	return best
 }
 
+// observe двигает серии. Успех обнуляет провалы и наоборот.
+// alive меняется только когда серия добрала порог, не с первой пробы.
 func (h *health) observe(ok bool, failN, recN int) (becameDead, becameAlive bool) {
 	if ok {
 		h.failStreak = 0
@@ -626,6 +665,8 @@ func (h *health) observe(ok bool, failN, recN int) (becameDead, becameAlive bool
 	return false, false
 }
 
+// probe обходит CheckURLs по порядку. Первый успех — проба удалась,
+// остальные URL в этом обходе не спрашиваются. Все провалы — бэкенд не ответил.
 func (s *Sticky) probe(ctx context.Context, b backend.Backend) bool {
 	for _, raw := range s.opt.CheckURLs {
 		if s.probeOne(ctx, b, raw) {
@@ -657,6 +698,8 @@ func (s *Sticky) probeOne(ctx context.Context, b backend.Backend, raw string) bo
 	}
 }
 
+// probeHTTP считает успехом только HTTP 204. Dial идёт через бэкенд,
+// не через сеть хоста. Тело ответа сливается с лимитом и не разбирается.
 func (s *Sticky) probeHTTP(ctx context.Context, b backend.Backend, raw string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
@@ -673,6 +716,7 @@ func (s *Sticky) probeHTTP(ctx context.Context, b backend.Backend, raw string) b
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   s.opt.CheckTimeout,
+		// Редирект не считается 204: проверяется ответ именно этого URL.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -701,8 +745,8 @@ func (s *Sticky) refreshEgress(ctx context.Context) {
 		return
 	}
 	s.mu.Lock()
-	// The fetch used a sampled backend. If it is no longer current, keep the
-	// previous IP instead of publishing an address from the wrong tunnel.
+	// Запрос шёл через снятый снимок. Если бэкенд уже не текущий, прежний IP
+	// остаётся: публиковать адрес чужого туннеля нельзя.
 	if !isCurrentID(s.current, b.ID()) || (s.current != nil && s.current != b) {
 		s.mu.Unlock()
 		return
@@ -754,6 +798,9 @@ func fetchEgress(ctx context.Context, b backend.Backend, raw string) (string, er
 	return addr.String(), nil
 }
 
+// readPrefer читает файл предпочтения заново на каждом цикле.
+// Нет файла, пусто или ошибка — "auto": выбор по правилам приоритета.
+// Команда `vpnpa prefer` только пишет файл, сигнал демону не нужен.
 func readPrefer(path string) string {
 	if path == "" {
 		return "auto"
@@ -781,7 +828,7 @@ var (
 	urlUser = regexp.MustCompile(`://[^/\s@]+@`)
 )
 
-// safeErr is a log string with vpn:// URIs and URL userinfo removed.
+// safeErr — строка для лога без vpn:// и userinfo в URL.
 func safeErr(err error) string {
 	if err == nil {
 		return ""

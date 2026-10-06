@@ -135,7 +135,7 @@ func TestInstallScript(t *testing.T) {
 		home := t.TempDir()
 		bin, fix := scriptFakes(t, payload, hash, "active")
 		log := filepath.Join(home, "log")
-		// Pretend the binary dir is already on PATH so bashrc is not required.
+		// Каталог бинарника уже в PATH, поэтому дописывать bashrc не нужно.
 		dest := filepath.Join(home, ".local", "bin")
 		cmd := exec.Command("/bin/sh", script)
 		cmd.Env = []string{

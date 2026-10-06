@@ -1,4 +1,5 @@
-// Package logx configures slog and carries a per-connection id.
+// Package logx настраивает slog и прячет секреты до того, как строка попадёт в журнал.
+// Сюда же кладётся короткий id соединения, чтобы связать строки одного dial.
 package logx
 
 import (
@@ -13,9 +14,9 @@ import (
 
 type ctxKey struct{}
 
-// New builds a logger writing to w. level is info by default; format is text
-// by default and json when requested. Values that look like vpn:// links,
-// SOCKS passwords, API keys or UAPI key material are redacted.
+// New собирает логер в w. По умолчанию уровень info и текстовый формат;
+// format "json" включает JSON. Значения, похожие на vpn://, пароль SOCKS,
+// API-ключ или ключ UAPI, заменяются до записи.
 func New(w io.Writer, level, format string) *slog.Logger {
 	var lvl slog.Level
 	switch strings.ToLower(strings.TrimSpace(level)) {
@@ -38,8 +39,8 @@ func New(w io.Writer, level, format string) *slog.Logger {
 	return slog.New(redactHandler{next: h})
 }
 
-// Redact hides secrets that must never reach a log line or command output.
-// The placeholder vpn://... used in help text is left as-is.
+// Redact прячет секреты в уже собранной строке: лог, stderr команды, status.
+// Заглушка vpn://... из текста справки не трогается — в ней нет ключа.
 func Redact(s string) string {
 	if s == "" {
 		return s
@@ -143,18 +144,20 @@ func redactValue(v slog.Value) slog.Value {
 	}
 }
 
-// WithConnID returns a child context carrying id.
+// WithConnID кладёт id в контекст соединения. Ingress ставит его до dial,
+// чтобы строки лога одного клиента несли один conn_id.
 func WithConnID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, ctxKey{}, id)
 }
 
-// ConnID returns the id stored by WithConnID.
+// ConnID возвращает id, записанный WithConnID. Пустая строка, если его не было.
 func ConnID(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKey{}).(string)
 	return v
 }
 
-// NewConnID returns a short random id safe to log.
+// NewConnID возвращает короткий случайный id, который можно писать в лог.
+// Это не секрет и не идентификатор клиента снаружи.
 func NewConnID() string {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {

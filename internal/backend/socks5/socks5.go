@@ -1,5 +1,7 @@
-// Package socks5 dials an already-listening SOCKS5 proxy. It does not start
-// or stop that process.
+// Package socks5 — выход через уже слушающий чужой SOCKS5.
+// Пакет не запускает и не останавливает этот процесс: Up только проверяет TCP,
+// Down снимает локальный флаг. Имя назначения уходит в CONNECT как имя,
+// резолвер хоста его не видит.
 package socks5
 
 import (
@@ -20,7 +22,7 @@ func init() {
 	})
 }
 
-// Backend is an egress through a foreign SOCKS5 proxy.
+// Backend — выход через чужой SOCKS5-прокси.
 type Backend struct {
 	id       string
 	priority int
@@ -32,7 +34,8 @@ type Backend struct {
 	up bool
 }
 
-// New parses a socks5 URI. The password and the full URI are not logged.
+// New разбирает URI socks5://[user:pass@]host:port.
+// Пароль и полный URI в лог не попадают. Соединение с прокси здесь не открывается.
 func New(cfg backend.Config, deps backend.Deps) (*Backend, error) {
 	creds, err := config.ParseSOCKS5URI(cfg.URI)
 	if err != nil {
@@ -42,6 +45,8 @@ func New(cfg backend.Config, deps backend.Deps) (*Backend, error) {
 	if creds.Auth {
 		auth = &proxy.Auth{User: creds.User, Password: creds.Pass}
 	}
+	// x/net/proxy передаёт host:port в SOCKS5 CONNECT как есть.
+	// Имя (atyp 0x03) не резолвится на этой машине.
 	d, err := proxy.SOCKS5("tcp", creds.Host, auth, &net.Dialer{})
 	if err != nil {
 		return nil, fmt.Errorf("socks5 uri: want socks5://host:port")
@@ -63,11 +68,17 @@ func New(cfg backend.Config, deps backend.Deps) (*Backend, error) {
 	}, nil
 }
 
-func (b *Backend) ID() string       { return b.id }
-func (b *Backend) Priority() int    { return b.priority }
+// ID возвращает имя бэкенда из конфига.
+func (b *Backend) ID() string { return b.id }
+
+// Priority возвращает приоритет из конфига.
+func (b *Backend) Priority() int { return b.priority }
+
+// Endpoint возвращает host:port прокси без userinfo. Это безопасно писать в лог.
 func (b *Backend) Endpoint() string { return b.host }
 
-// Up checks that a TCP connection to the proxy opens. Nothing is spawned.
+// Up проверяет, что до прокси открывается TCP. Процесс прокси не порождается:
+// им владеет кто-то снаружи. Неуспешный Up оставляет бэкенд опущенным.
 func (b *Backend) Up(ctx context.Context) error {
 	var d net.Dialer
 	c, err := d.DialContext(ctx, "tcp", b.host)
@@ -82,7 +93,7 @@ func (b *Backend) Up(ctx context.Context) error {
 	return nil
 }
 
-// Down drops the local flag. The foreign proxy is left running.
+// Down сбрасывает локальный флаг. Чужой прокси продолжает слушать.
 func (b *Backend) Down(context.Context) error {
 	b.mu.Lock()
 	b.up = false
@@ -91,7 +102,8 @@ func (b *Backend) Down(context.Context) error {
 	return nil
 }
 
-// DialContext sends CONNECT to the proxy. A domain name is forwarded as a name.
+// DialContext шлёт SOCKS5 CONNECT на прокси. Доменное имя уходит как имя
+// (atyp 0x03), а не как заранее разрешённый IP. Вызов до Up — ошибка.
 func (b *Backend) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	switch network {
 	case "tcp", "tcp4", "tcp6":

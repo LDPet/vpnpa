@@ -1,5 +1,6 @@
-// Package backend is the contract and factory registry for egress tunnels.
-// It does not import concrete backends; those register themselves.
+// Package backend — контракт выхода и реестр фабрик.
+// Конкретные бэкенды этот пакет не импортирует: они регистрируются в своём init.
+// Реестр отдельный от ingress, поэтому тип "socks5" может быть и входом, и выходом.
 package backend
 
 import (
@@ -11,21 +12,29 @@ import (
 	"github.com/LDPet/vpnpa/internal/dialer"
 )
 
-// Compile-time check that Backend includes Dialer.
+// Проверка на этапе компиляции: Backend включает Dialer.
 var _ interface {
 	dialer.Dialer
 } = (Backend)(nil)
 
-// Backend is one egress. It does not know about balancing or SOCKS.
+// Backend — один выход. Балансировку и локальный SOCKS он не знает.
 type Backend interface {
 	dialer.Dialer
+
+	// ID — имя из конфига. По нему sticky помнит здоровье и файл prefer.
 	ID() string
+	// Priority — чем больше число, тем раньше бэкенд берётся, когда текущего
+	// ещё нет или текущий уже нежив. Сам по себе больший приоритет текущего не вытесняет.
 	Priority() int
+	// Up поднимает туннель или проверяет чужой прокси.
+	// Повторный вызов уже поднятого бэкенда ничего не делает.
 	Up(ctx context.Context) error
+	// Down гасит то, чем владеет vpnpa. Чужой процесс SOCKS5 не останавливает
+	// и сохранённую пару ключей API не удаляет.
 	Down(ctx context.Context) error
 }
 
-// Config is the per-backend block from the YAML file.
+// Config — один блок backends из YAML.
 type Config struct {
 	ID       string
 	Type     string
@@ -33,13 +42,14 @@ type Config struct {
 	URI      string
 }
 
-// Deps are process-wide dependencies handed to a factory.
+// Deps — зависимости процесса, которые фабрика получает снаружи.
 type Deps struct {
-	Logger   *slog.Logger
+	Logger *slog.Logger
+	// StateDir — каталог состояния. Бэкенд AmneziaWG кладёт туда ключи API.
 	StateDir string
 }
 
-// Factory builds a backend from config.
+// Factory собирает бэкенд из конфига. Её регистрирует пакет протокола.
 type Factory func(cfg Config, deps Deps) (Backend, error)
 
 var (
@@ -47,15 +57,15 @@ var (
 	factories = map[string]Factory{}
 )
 
-// Register adds a backend type. The ingress type of the same name is a
-// different registry, so "socks5" can exist on both sides.
+// Register добавляет тип бэкенда. Вызывается из init конкретного пакета.
+// Реестр ingress с тем же именем — другой: "socks5" допустим с обеих сторон.
 func Register(typ string, f Factory) {
 	mu.Lock()
 	defer mu.Unlock()
 	factories[typ] = f
 }
 
-// Types returns the registered backend type names.
+// Types возвращает имена зарегистрированных типов бэкендов.
 func Types() []string {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -66,7 +76,7 @@ func Types() []string {
 	return out
 }
 
-// Known reports whether typ was registered.
+// Known сообщает, зарегистрирован ли тип.
 func Known(typ string) bool {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -74,7 +84,7 @@ func Known(typ string) bool {
 	return ok
 }
 
-// New constructs a backend. Unknown types fail here.
+// New создаёт бэкенд. Неизвестный тип отклоняется здесь, до Up.
 func New(cfg Config, deps Deps) (Backend, error) {
 	mu.RLock()
 	f, ok := factories[cfg.Type]
@@ -88,7 +98,8 @@ func New(cfg Config, deps Deps) (Backend, error) {
 	return f(cfg, deps)
 }
 
-// EndpointOf returns a host:port safe to log, when the backend provides one.
+// EndpointOf возвращает host:port, который безопасно писать в лог.
+// Пустая строка, если бэкенд не сообщает точку входа. В строке нет ключей и паролей.
 func EndpointOf(b Backend) string {
 	type endpoint interface {
 		Endpoint() string

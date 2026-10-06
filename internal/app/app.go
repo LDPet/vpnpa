@@ -1,4 +1,9 @@
-// Package app wires ingresses, the sticky balancer and backends into one process.
+// Package app собирает входы, sticky-балансировщик и бэкенды в один процесс.
+//
+// SIGHUP перечитывает конфиг. Бэкенд с тем же id и тем же URI не получает
+// Down/Up: балансировщик держит тот же указатель, здоровье и текущий выбор
+// переживают перезагрузку. Смена URI подменяет внутренность, не указатель.
+// Удаление id из файла останавливает бэкенд.
 package app
 
 import (
@@ -21,23 +26,27 @@ import (
 	"github.com/LDPet/vpnpa/internal/config"
 	"github.com/LDPet/vpnpa/internal/ingress"
 
+	// Пустой импорт вызывает init и регистрирует фабрику. Без этих строк
+	// New не знает типов, хотя пакеты лежат в модуле.
 	_ "github.com/LDPet/vpnpa/internal/backend/amneziawg"
 	_ "github.com/LDPet/vpnpa/internal/backend/socks5"
 	_ "github.com/LDPet/vpnpa/internal/ingress/http"
 	_ "github.com/LDPet/vpnpa/internal/ingress/socks5"
 )
 
-// Options controls one daemon process.
+// Options задаёт один процесс демона.
 type Options struct {
 	File       config.File
 	ConfigPath string
-	StateDir   string
-	Logger     *slog.Logger
-	// Signals enables SIGINT, SIGTERM and SIGHUP. Tests cancel ctx instead.
+	// StateDir — каталог status.json, prefer и ключей API. Пустой путь
+	// отключает запись статуса и переиспользование ключей.
+	StateDir string
+	Logger   *slog.Logger
+	// Signals включает SIGINT, SIGTERM и SIGHUP. Тесты вместо этого отменяют ctx.
 	Signals bool
 }
 
-// App is the running daemon.
+// App — работающий демон: два входа, один балансировщик и набор бэкендов.
 type App struct {
 	opt Options
 
@@ -59,10 +68,10 @@ type managed struct {
 	typ string
 }
 
-// tracked is the object the balancer holds. The same pointer stays for an id
-// across reloads, so health and the current selection survive. Priority can
-// change in place. A new URI swaps the inner backend without Down/Up of an
-// unchanged one.
+// tracked — объект, который держит балансировщик. Указатель на него живёт,
+// пока id есть в конфиге, поэтому здоровье и текущий выбор переживают SIGHUP.
+// Приоритет меняется на месте. Новый URI подменяет inner через swap
+// (старый Down, новый уже поднят). Неизменный URI не получает ни Down, ни Up.
 type tracked struct {
 	id string
 
@@ -119,6 +128,9 @@ func (t *tracked) Endpoint() string {
 
 var _ backend.Backend = (*tracked)(nil)
 
+// swap подменяет туннель внутри того же указателя. Dial либо ещё на старом
+// inner, либо уже на новом: оба захвата под одним мьютексом. Старый гасится
+// после публикации нового, чтобы не было окна без устройства у текущего id.
 func (t *tracked) swap(ctx context.Context, next backend.Backend) {
 	t.mu.Lock()
 	old := t.inner
@@ -129,7 +141,7 @@ func (t *tracked) swap(ctx context.Context, next backend.Backend) {
 	}
 }
 
-// New prepares an app. Call Run to start listeners.
+// New готовит приложение. Слушатели и бэкенды поднимает Run.
 func New(opt Options) *App {
 	if opt.Logger == nil {
 		opt.Logger = slog.New(slog.DiscardHandler)
@@ -137,8 +149,9 @@ func New(opt Options) *App {
 	return &App{opt: opt, managed: map[string]*managed{}}
 }
 
-// Run brings every backend up, serves both ingresses and probes until ctx
-// is done. SIGHUP reloads the config file without bouncing an unchanged backend.
+// Run поднимает бэкенды, слушает SOCKS5 и HTTP CONNECT и гоняет пробы, пока
+// ctx не закончится. SIGINT и SIGTERM останавливают процесс. SIGHUP вызывает
+// Reload: неизменный бэкенд не переподнимается.
 func (a *App) Run(ctx context.Context) error {
 	if err := a.boot(ctx); err != nil {
 		return err
@@ -262,7 +275,11 @@ func (a *App) serve(ctx context.Context, typ, addr string) error {
 	return in.Serve(ctx, a.balancer)
 }
 
-// Reload rereads the config. A backend with the same id and uri is left running.
+// Reload перечитывает файл конфига.
+// Тот же id и тот же URI остаются поднятыми. Тот же id с другим URI получает
+// новый inner, указатель для балансировщика не меняется. id, которого больше
+// нет в файле, останавливается. Ошибка разбора файла не трогает уже работающее:
+// upAll при ошибке создания гасит только то, что успел поднять в этой попытке.
 func (a *App) Reload(ctx context.Context) error {
 	if a.opt.ConfigPath == "" {
 		return fmt.Errorf("reload: config path is empty")
@@ -291,6 +308,11 @@ func (a *App) Reload(ctx context.Context) error {
 	return nil
 }
 
+// upAll приводит набор бэкендов к specs.
+// Совпадение id, URI и типа — оставить tracked, обновить только приоритет.
+// Совпадение id при другом URI — поднять новый и swap в старый tracked.
+// Новый id — новый tracked. Ошибка Up логируется, но бэкенд остаётся в списке:
+// проба сама пометит его мёртвым. Ошибка New откатывает уже поднятые в этой попытке.
 func (a *App) upAll(ctx context.Context, specs []config.Backend, prev map[string]*managed) ([]backend.Backend, error) {
 	type item struct {
 		spec  config.Backend
@@ -361,6 +383,8 @@ func (a *App) upAll(ctx context.Context, specs []config.Backend, prev map[string
 	return list, nil
 }
 
+// dropMissing останавливает id, которых нет в новом файле, и убирает их
+// из карты. Балансировщик получит укороченный список отдельно, через SetBackends.
 func (a *App) dropMissing(ctx context.Context, specs []config.Backend) {
 	keep := map[string]struct{}{}
 	for _, spec := range specs {
@@ -393,6 +417,8 @@ func (a *App) logBackends() {
 	}
 }
 
+// writeStatus атомарно переписывает status.json. Обрыв не должен оставить
+// обрезанный файл, который `vpnpa status` прочитает как состояние.
 func (a *App) writeStatus(st sticky.Status) {
 	if a.opt.StateDir == "" {
 		return

@@ -1,5 +1,8 @@
 package config
 
+// Файл store.go дописывает бэкенды в YAML и разбирает URI socks5://.
+// Запись идёт через atomicfile: читатель не видит обрезанный конфиг с ключом.
+
 import (
 	"errors"
 	"fmt"
@@ -13,12 +16,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ErrBadSOCKS5URI is returned when a socks5 backend URI is not
-// socks5://host:port. The error text never includes the URI or password.
+// ErrBadSOCKS5URI возвращается, когда URI бэкенда socks5 — не socks5://host:port.
+// Текст ошибки никогда не содержит сам URI и пароль.
 var ErrBadSOCKS5URI = errors.New("socks5 uri must be socks5://host:port")
 
-// SOCKS5Creds is the host:port of a foreign proxy. User and Pass are set only
-// when the URI has userinfo. Callers must not log Pass or the original URI.
+// SOCKS5Creds — host:port чужого прокси. User и Pass заполняются только если
+// в URI есть userinfo. Pass и исходный URI логировать нельзя.
 type SOCKS5Creds struct {
 	Host string
 	User string
@@ -26,7 +29,8 @@ type SOCKS5Creds struct {
 	Auth bool
 }
 
-// Save writes f to path with mode 0600. Existing permissions are never widened.
+// Save пишет f в path с правами 0600. Существующие права не расширяются:
+// atomicfile снимает group/world, которых у файла ещё не было.
 func Save(path string, f File) error {
 	raw, err := yaml.Marshal(f)
 	if err != nil {
@@ -39,8 +43,8 @@ func Save(path string, f File) error {
 	return os.Chmod(path, FileMode)
 }
 
-// InstallConfig writes the template only when path does not already exist.
-// A config that already has links is left untouched. The file mode is 0600.
+// InstallConfig пишет шаблон, только если path ещё нет.
+// Файл со ссылками не затирается. Права в любом случае приводятся к 0600.
 func InstallConfig(path string) (created bool, err error) {
 	if _, err := os.Stat(path); err == nil {
 		if chErr := os.Chmod(path, FileMode); chErr != nil {
@@ -67,13 +71,14 @@ func dirOf(path string) string {
 	return path[:i]
 }
 
-// ValidateAmnezia optionally checks that a vpn:// payload decodes.
-// The amneziawg package installs it; tests of the scheme check can leave it nil.
+// ValidateAmnezia при желании проверяет, что полезная нагрузка vpn:// разбирается.
+// Пакет amneziawg ставит сюда DecodeURI. Тесты проверки схемы могут оставить nil:
+// тогда add смотрит только на префикс, не на qCompress.
 var ValidateAmnezia func(uri string) error
 
-// Add appends an amneziawg backend. uri must be a vpn:// link.
-// The first backend gets priority 100, each next one is 10 lower.
-// id defaults to vpn-N. The file mode stays 0600.
+// Add дописывает бэкенд amneziawg. uri обязан начинаться с vpn://.
+// Первый бэкенд получает приоритет 100, каждый следующий — на 10 меньше.
+// Пустой id становится vpn-N. Права файла остаются 0600.
 func Add(path, id, uri string) (Backend, error) {
 	uri = strings.TrimSpace(uri)
 	if !strings.HasPrefix(uri, "vpn://") {
@@ -87,7 +92,8 @@ func Add(path, id, uri string) (Backend, error) {
 	return add(path, id, "amneziawg", uri)
 }
 
-// AddSOCKS5 appends a socks5 backend. uri must be socks5://.
+// AddSOCKS5 дописывает бэкенд socks5. uri обязан быть socks5://host:port,
+// с паролем или без. Ошибка разбора не цитирует пароль.
 func AddSOCKS5(path, id, uri string) (Backend, error) {
 	uri = strings.TrimSpace(uri)
 	if _, err := ParseSOCKS5URI(uri); err != nil {
@@ -146,8 +152,8 @@ func nextPriority(backends []Backend) int {
 	return min - 10
 }
 
-// ParseSOCKS5URI checks a socks5://host:port URI with an optional username and
-// password. Errors do not contain the URI or the password.
+// ParseSOCKS5URI проверяет socks5://host:port с необязательными именем и паролем.
+// Путь, query и fragment запрещены. Ошибки не содержат URI и пароль.
 func ParseSOCKS5URI(uri string) (SOCKS5Creds, error) {
 	u, err := url.Parse(strings.TrimSpace(uri))
 	if err != nil || u.Scheme != "socks5" || u.Host == "" || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
@@ -173,7 +179,7 @@ func ParseSOCKS5URI(uri string) (SOCKS5Creds, error) {
 	return creds, nil
 }
 
-// SOCKS5Endpoint returns host:port without userinfo.
+// SOCKS5Endpoint возвращает host:port без userinfo — строку, которую можно логировать.
 func SOCKS5Endpoint(uri string) (string, error) {
 	creds, err := ParseSOCKS5URI(uri)
 	if err != nil {

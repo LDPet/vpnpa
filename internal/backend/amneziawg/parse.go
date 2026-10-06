@@ -1,5 +1,10 @@
 package amneziawg
 
+// Файл parse.go превращает JSON конверта Amnezia в Tunnel.
+// Текст last_config — обычный WireGuard conf плюс поля обфускации AWG.
+// Чего нет в conf, добирается из JSON last_config: клиент Amnezia часто
+// оставляет H/S/I и HeaderProtectionKey только там.
+
 import (
 	"encoding/base64"
 	"encoding/hex"
@@ -10,7 +15,12 @@ import (
 	"strings"
 )
 
-// Tunnel is the resolved userspace configuration. Key material is hex.
+// Tunnel — готовая конфигурация userspace-устройства. Ключи уже в hex,
+// как ждёт UAPI amneziawg-go, не в base64 conf-файла.
+// Поля Jc…I5 и HeaderProtectionKey — параметры обфускации AWG 3.1.
+// Пустая строка значит «не передавать в UAPI», библиотека оставит своё умолчание.
+// Значения не переписываются, даже если сочетание RandomTrailers и диапазонов
+// H1–H3 известно как дырявое: см. TrailersRangeWarning.
 type Tunnel struct {
 	Addresses              []netip.Addr
 	DNS                    []netip.Addr
@@ -48,8 +58,11 @@ type Tunnel struct {
 	DisableCookies         string
 }
 
-// ParseFullConfig turns a decoded full-config JSON document into a Tunnel.
-// privateKey overrides $WIREGUARD_CLIENT_PRIVATE_KEY when set (API flow).
+// ParseFullConfig собирает Tunnel из уже раскодированного JSON.
+// privateKey, если непустой, подставляется вместо ключа из ссылки:
+// так API-поток использует сохранённую пару, а не $WIREGUARD_CLIENT_PRIVATE_KEY.
+// Плейсхолдеры $PRIMARY_DNS, $SECONDARY_DNS и этот ключ раскрываются в тексте conf
+// до разбора. Поля ищутся без учёта регистра, '_' и '-'.
 func ParseFullConfig(doc []byte, privateKey string) (Tunnel, error) {
 	var env envelope
 	if err := json.Unmarshal(doc, &env); err != nil {
@@ -144,7 +157,8 @@ func ParseFullConfig(doc []byte, privateKey string) (Tunnel, error) {
 			return Tunnel{}, fmt.Errorf("preshared key: %w", err)
 		}
 	}
-	// The conf text often omits AWG 3.1 fields; vpn:// keeps them on last_config.
+	// Текст conf часто без полей AWG 3.1; vpn:// хранит их в JSON last_config.
+	// fill ниже смотрит сначала conf, потом JSON, и не затирает уже найденное.
 	if hpk := firstString(fields.get("headerprotectionkey"), stringField(last, "headerprotectionkey")); hpk != "" {
 		t.HeaderProtectionKeyHex, err = keyToHex(hpk)
 		if err != nil {
@@ -206,6 +220,8 @@ func ParseFullConfig(doc []byte, privateKey string) (Tunnel, error) {
 	return t, nil
 }
 
+// applyPlaceholders раскрывает плейсхолдеры шаблона Amnezia в тексте conf.
+// Ключ клиента подставляется только если плейсхолдер реально есть и ключ известен.
 func applyPlaceholders(text, dns1, dns2, clientKey string) string {
 	repl := []struct{ old, new string }{
 		{"$PRIMARY_DNS", dns1},
@@ -236,6 +252,9 @@ func (f wgFields) getAll(key string) []string {
 	return f.vals[normalizeKey(key)]
 }
 
+// parseWG читает conf как набор ключ=значение. Секции [Interface]/[Peer]
+// не различаются: UAPI всё равно плоский. Повтор ключа сохраняется,
+// get берёт последнее значение, getAll — все (Address, DNS, AllowedIPs).
 func parseWG(text string) wgFields {
 	f := wgFields{vals: map[string][]string{}}
 	for _, line := range strings.Split(text, "\n") {
@@ -348,6 +367,8 @@ func parseAddrs(s string) ([]netip.Addr, error) {
 	return out, nil
 }
 
+// keyToHex приводит ключ к 32 байтам hex. Допускается уже hex (64 символа)
+// или base64 из conf. UAPI amneziawg-go принимает только hex.
 func keyToHex(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if len(s) == 64 && isHex(s) {
@@ -434,8 +455,9 @@ func normalizeBool(s string) string {
 	}
 }
 
-// TrailersRangeWarning reports the amneziawg-go issue combination:
-// RandomTrailers enabled together with ranged H1, H2 and H3.
+// TrailersRangeWarning сообщает сочетание, на котором amneziawg-go теряет пакеты:
+// RandomTrailers включён и H1, H2, H3 заданы диапазонами (вида "1-5").
+// Функция только предупреждает. Значения в Tunnel не меняются.
 func TrailersRangeWarning(t Tunnel) bool {
 	if t.RandomTrailers != "true" {
 		return false
