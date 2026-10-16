@@ -1,10 +1,9 @@
-// Package paths — каталоги rootless-установки vpnpa на Linux.
-// Всё лежит в домашнем каталоге пользователя: конфиг, state, user unit и бинарник.
-// root и /etc не используются.
+// Package paths — каталоги установки vpnpa без root и без /etc.
+// На Linux это домашний каталог: конфиг, state, user unit и бинарник.
+// На Windows конфиг и state лежат в %AppData%\vpnpa, unit нет.
 package paths
 
 import (
-	"os"
 	"path/filepath"
 )
 
@@ -25,22 +24,25 @@ type Layout struct {
 	BinPath string
 }
 
-// Default строит раскладку от домашнего каталога текущего пользователя.
-func Default() (Layout, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Layout{}, err
-	}
-	return FromHome(home), nil
-}
-
-// FromHome строит раскладку от заданного home. Удобно в тестах и при установке.
+// FromHome строит Linux-раскладку от заданного home. Удобно в тестах и при установке.
+// На Windows Default этим путём не пользуется.
 func FromHome(home string) Layout {
 	return Layout{
 		ConfigPath: filepath.Join(home, ".config", configDirName, "config.yaml"),
 		StateDir:   filepath.Join(home, ".local", "state", stateDirName),
 		UnitPath:   filepath.Join(home, ".config", "systemd", "user", "vpnpa.service"),
 		BinPath:    filepath.Join(home, ".local", "bin", "vpnpa"),
+	}
+}
+
+// FromAppData строит Windows-раскладку от каталога %AppData% (или его аналога в тесте).
+// Unit нет: автозапуск — запись HKCU Run, не systemd. BinPath заполняет Default
+// из пути исполняемого файла, здесь он пустой.
+func FromAppData(appData string) Layout {
+	base := filepath.Join(appData, configDirName)
+	return Layout{
+		ConfigPath: filepath.Join(base, "config.yaml"),
+		StateDir:   filepath.Join(base, "state"),
 	}
 }
 

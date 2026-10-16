@@ -6,13 +6,13 @@
 
 ## Сборка из исходников
 
-Нужен Go 1.27.1.
+Нужен Go 1.27.2.
 
 ```bash
 go build -o vpnpa ./cmd/vpnpa
 ```
 
-Обычный путь — скачать статический бинарник релиза в `~/.local/bin`, а не собирать самому. Релиз собирается на тег git: linux/amd64 и linux/arm64, `CGO_ENABLED=0`.
+Обычный путь на Linux — скачать статический бинарник релиза в `~/.local/bin`, а не собирать самому. Релиз собирается на тег git: linux/amd64, linux/arm64, windows/amd64 и windows/arm64, `CGO_ENABLED=0`.
 
 ## Пример config.yaml
 
@@ -80,6 +80,18 @@ vpnpa up
 - unit: `~/.config/systemd/user/vpnpa.service`, `ExecStart` вызывает `vpnpa run`
 - состояние: `~/.local/state/vpnpa/status.json`
 - ключ API-ссылки: `~/.local/state/vpnpa/keys/<id>`, права `0600`
+
+## Windows
+
+Скачайте `vpnpa-windows-amd64.exe` или `vpnpa-windows-arm64.exe` со страницы релизов GitHub, положите файл куда удобно и запустите. `install.sh` только для Linux. Консольного окна нет: процесс фоновый, в трее иконка.
+
+Те же порты, тот же процесс: SOCKS5 `127.0.0.1:1080` и HTTP CONNECT `127.0.0.1:8080`. Оба входа по-прежнему зовут один sticky. AmneziaWG — userspace netstack, без TUN, Wintun и драйверов.
+
+Конфиг и состояние — `%AppData%\vpnpa`: `config.yaml` и каталог `state` (status, prefer, ключи, лог). Это не пути `~/.config` и `~/.local`.
+
+В трее видно, какой бэкенд текущий и жив ли он. Оттуда же «Включить», «Выключить», предпочтение по списку бэкендов и «Выход» — процесс останавливается. Ссылку из трея не добавить: в cmd или PowerShell работает `vpnpa add 'vpn://...'`.
+
+`vpnpa enable` ставит автозапуск при входе через `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Права администратора и служба Windows не нужны. `vpnpa disable` снимает его. `vpnpa up` поднимает фоновый процесс с треем, `vpnpa down` останавливает его. `vpnpa run` по-прежнему занимает консоль и нужен для отладки.
 
 ## Пользование
 

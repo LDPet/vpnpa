@@ -13,11 +13,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/LDPet/vpnpa/internal/app"
@@ -25,7 +22,6 @@ import (
 	"github.com/LDPet/vpnpa/internal/config"
 	"github.com/LDPet/vpnpa/internal/logx"
 	"github.com/LDPet/vpnpa/internal/paths"
-	"github.com/LDPet/vpnpa/internal/unitfile"
 )
 
 // Runner запускает команды хоста вроде systemctl. Тесты подставляют свою реализацию.
@@ -72,6 +68,9 @@ func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if len(rest) == 0 {
+		if code, ok := launchWithoutCommand(*configPath, *stateDir, *logLevel, *logFormat, stderr); ok {
+			return code
+		}
 		_, _ = fmt.Fprintln(stderr, usage)
 		return 2
 	}
@@ -98,17 +97,23 @@ func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 	case "up":
 		err = cmdUp(ctx, layout, run, stdout)
 	case "down":
-		err = run.Run(ctx, "systemctl", "--user", "stop", "vpnpa.service")
+		err = cmdDown(ctx, layout, run)
 	case "status":
 		err = cmdStatus(layout, stdout)
 	case "logs":
-		err = cmdLogs(ctx, run, cmdArgs)
+		err = cmdLogs(ctx, layout, run, cmdArgs, stdout)
 	case "enable":
-		err = cmdEnable(ctx, run, stdout)
+		err = cmdEnable(ctx, layout, run, stdout)
 	case "disable":
-		err = run.Run(ctx, "systemctl", "--user", "disable", "vpnpa.service")
+		err = cmdDisable(ctx, layout, run)
 	case "update":
-		err = cmdUpdate(ctx, run, stdout, stderr)
+		err = cmdUpdate(ctx, run, layout, stdout, stderr)
+	case "tray":
+		if code, ok := launchTrayCommand(layout, *logLevel, *logFormat, stderr); ok {
+			return code
+		}
+		_, _ = fmt.Fprintf(stderr, "неизвестная команда %q\n%s\n", cmd, usage)
+		return 2
 	case "help", "-h", "--help":
 		_, _ = fmt.Fprintln(stdout, usage)
 		return 0
@@ -143,12 +148,21 @@ func layoutFrom(configPath, stateDir string) (paths.Layout, error) {
 	return layout, nil
 }
 
-// cmdInstall готовит каталоги, конфиг 0600 и user unit, затем daemon-reload.
-// Сервис не стартует: пустой список бэкендов не должен поднимать слушатели.
+// cmdInstall готовит каталоги и конфиг 0600. Сервис не стартует:
+// пустой список бэкендов не должен поднимать слушатели.
+// На Linux следом пишется user unit. На Windows unit нет.
 func cmdInstall(ctx context.Context, layout paths.Layout, run Runner, stderr io.Writer) error {
-	if layout.UnitPath == "" || layout.BinPath == "" {
-		return fmt.Errorf("не удалось определить путь unit или бинарника")
+	if err := installPrereq(layout); err != nil {
+		return err
 	}
+	if err := prepareLayout(layout); err != nil {
+		return err
+	}
+	return finishInstall(ctx, layout, run, stderr)
+}
+
+// prepareLayout создаёт каталоги state и keys и конфиг 0600, если файла ещё нет.
+func prepareLayout(layout paths.Layout) error {
 	if err := ensurePrivateDir(layout.StateDir); err != nil {
 		return err
 	}
@@ -161,17 +175,7 @@ func cmdInstall(ctx context.Context, layout paths.Layout, run Runner, stderr io.
 	if err := ensurePrivateDir(filepath.Dir(layout.ConfigPath)); err != nil {
 		return err
 	}
-	if err := os.Chmod(layout.ConfigPath, 0o600); err != nil {
-		return err
-	}
-	text := unitfile.Text(layout.BinPath, layout.ConfigPath, layout.StateDir)
-	if err := atomicfile.Write(layout.UnitPath, []byte(text), 0o644); err != nil {
-		return err
-	}
-	if err := run.Run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
-		_, _ = fmt.Fprintf(stderr, "systemctl --user недоступен. Войдите в обычную пользовательскую сессию или выполните: sudo loginctl enable-linger %s\n", currentUser())
-	}
-	return nil
+	return os.Chmod(layout.ConfigPath, 0o600)
 }
 
 func cmdAdd(ctx context.Context, layout paths.Layout, run Runner, socks bool, args []string, stderr io.Writer) error {
@@ -263,6 +267,7 @@ func cmdPrefer(layout paths.Layout, args []string) error {
 
 // cmdRun — передний план демона, то, что стоит в ExecStart user unit.
 // Сигналы включены: SIGHUP перечитывает конфиг, SIGINT и SIGTERM выходят.
+// На Windows тот же процесс ещё слушает события трея: reload и остановка.
 func cmdRun(layout paths.Layout, level, format string) error {
 	f, err := config.Load(layout.ConfigPath)
 	if err != nil {
@@ -278,6 +283,11 @@ func cmdRun(layout paths.Layout, level, format string) error {
 		return err
 	}
 	log := logx.New(os.Stderr, f.Log.Level, f.Log.Format)
+	hooks, err := foregroundHooks(log)
+	if err != nil {
+		return err
+	}
+	defer hooks.stop()
 	a := app.New(app.Options{
 		File:       f,
 		ConfigPath: layout.ConfigPath,
@@ -285,7 +295,8 @@ func cmdRun(layout paths.Layout, level, format string) error {
 		Logger:     log,
 		Signals:    true,
 	})
-	return a.Run(context.Background())
+	hooks.bind(a)
+	return a.Run(hooks.ctx)
 }
 
 func cmdUp(ctx context.Context, layout paths.Layout, run Runner, stdout io.Writer) error {
@@ -294,9 +305,9 @@ func cmdUp(ctx context.Context, layout paths.Layout, run Runner, stdout io.Write
 		return err
 	}
 	if len(f.Backends) == 0 {
-		return fmt.Errorf("список бэкендов пуст, сервис не запущен. Добавьте ссылку: vpnpa add 'vpn://...'")
+		return errNoBackends()
 	}
-	if err := run.Run(ctx, "systemctl", "--user", "start", "vpnpa.service"); err != nil {
+	if err := startProxy(ctx, layout, run); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(15 * time.Second)
@@ -339,114 +350,8 @@ func cmdStatus(layout paths.Layout, stdout io.Writer) error {
 	return nil
 }
 
-func cmdLogs(ctx context.Context, run Runner, args []string) error {
-	follow := false
-	for _, a := range args {
-		switch a {
-		case "-f", "--follow":
-			follow = true
-		default:
-			return fmt.Errorf("vpnpa logs принимает только -f")
-		}
-	}
-	journal := []string{"--user", "-u", "vpnpa.service", "-n", "100", "--no-pager"}
-	if follow {
-		journal = []string{"--user", "-u", "vpnpa.service", "-n", "100", "-f"}
-	}
-	return run.Run(ctx, "journalctl", journal...)
-}
-
-func cmdEnable(ctx context.Context, run Runner, stdout io.Writer) error {
-	if err := run.Run(ctx, "systemctl", "--user", "enable", "vpnpa.service"); err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintln(stdout, "Сервис включён и поднимется при входе в сессию.")
-	_, _ = fmt.Fprintf(stdout, "После выхода из сессии он живёт, только если включён linger: sudo loginctl enable-linger %s\n", currentUser())
-	return nil
-}
-
-// killProc и чтение /proc подменяются в тестах.
-var (
-	killProc    = syscall.Kill
-	procExe     = func(pid int) (string, error) { return os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)) }
-	procCmdline = func(pid int) ([]byte, error) {
-		return os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)) // #nosec G304 -- pid это числовой MainPID от systemctl
-	}
-)
-
-// signalReload посылает SIGHUP MainPID user unit. Ошибка systemctl и мёртвый
-// сервис тихо пропускаются: add уже записал конфиг, демон подхватит его при старте.
-// pid <= 1 отсекается. Перед сигналом isVpnpaRun проверяет, что это всё ещё
-// `vpnpa run`, а не чужой процесс, которому достался тот же номер.
-func signalReload(ctx context.Context, run Runner) {
-	out, err := run.Output(ctx, "systemctl", "--user", "show", "-p", "MainPID", "--value", "vpnpa.service")
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || pid <= 1 {
-		return
-	}
-	if !isVpnpaRun(pid) {
-		return
-	}
-	_ = killProc(pid, syscall.SIGHUP)
-}
-
-// isVpnpaRun сообщает, что pid — демон vpnpa: базовое имя exe равно vpnpa
-// и среди аргументов есть "run". Суффикс " (deleted)" снимается: после
-// `vpnpa update` ядро помечает так старый inode ещё живого процесса.
-// Чужой pid и другая команда того же бинарника сигнал не получают.
-func isVpnpaRun(pid int) bool {
-	exe, err := procExe(pid)
-	if err != nil {
-		return false
-	}
-	exe = strings.TrimSuffix(exe, " (deleted)")
-	if filepath.Base(exe) != "vpnpa" {
-		return false
-	}
-	raw, err := procCmdline(pid)
-	if err != nil {
-		return false
-	}
-	parts := strings.Split(string(raw), "\x00")
-	for _, p := range parts[1:] {
-		if p == "run" {
-			return true
-		}
-	}
-	return false
-}
-
-func currentUser() string {
-	u := os.Getenv("USER")
-	if u == "" {
-		cu, err := user.Current()
-		if err != nil {
-			return "$USER"
-		}
-		u = cu.Username
-	}
-	if !safeUser(u) {
-		return "$USER"
-	}
-	return u
-}
-
-func safeUser(s string) bool {
-	if s == "" || len(s) > 32 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == '.':
-		default:
-			return false
-		}
-	}
-	return true
+func errNoBackends() error {
+	return fmt.Errorf("список бэкендов пуст, сервис не запущен. Добавьте ссылку: vpnpa add 'vpn://...'")
 }
 
 // ensurePrivateDir создаёт каталог с правами 0700 и ужимает уже существующий до 0700.
@@ -515,5 +420,7 @@ const usage = `vpnpa — локальный прокси поверх AmneziaWG 
   vpnpa enable
   vpnpa disable
   vpnpa update
+
+На Windows запуск без команды открывает трей. install.sh и systemd — только Linux.
 
 Флаги: --config, --state-dir, --log-level, --log-format`

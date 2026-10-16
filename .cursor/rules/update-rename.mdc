@@ -1,9 +1,9 @@
 ---
 description: update заменяет бинарник через временный файл и rename
-globs: internal/cli/update.go,install.sh
+globs: internal/cli/update.go,internal/cli/update_other.go,internal/cli/update_windows.go,install.sh
 alwaysApply: false
 ---
 
-`vpnpa update` (`updateExe`) не пишет в исполняемый файл. Релиз скачивается в `os.CreateTemp(dir, ".vpnpa-update-*")` в том же каталоге, сверяется sha256, ставится mode `0755`, затем `os.Rename` на путь бинарника. Прямая запись в запущенный файл на Linux даёт `ETXTBSY`.
+`vpnpa update` (`updateExe`) не пишет в исполняемый файл. Релиз скачивается в `os.CreateTemp(dir, ".vpnpa-update-*")` в том же каталоге, сверяется sha256, ставится mode `0755`, затем подмена через `rename`. Прямая запись в запущенный файл на Linux даёт `ETXTBSY`. На Windows запущенный exe сначала переименовывается в `*.old`, и только потом временный файл занимает его имя.
 
-Если `vpnpa.service` в состоянии `active`, после `rename` идёт `systemctl --user restart vpnpa.service`. Сборка релиза — только linux/amd64 и linux/arm64. `install.sh` кладёт бинарник так же: `mktemp` в каталоге назначения и `rename`.
+Если `vpnpa.service` в состоянии `active`, после подмены идёт `systemctl --user restart vpnpa.service`. На Windows вместо этого останавливается трей и запускается новый exe. Сборка релиза — linux/amd64, linux/arm64, windows/amd64, windows/arm64. Имена: `vpnpa-linux-amd64`, `vpnpa-linux-arm64`, `vpnpa-windows-amd64.exe`, `vpnpa-windows-arm64.exe`. `install.sh` остаётся только для Linux и кладёт бинарник так же: `mktemp` в каталоге назначения и `rename`.

@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/LDPet/vpnpa/internal/paths"
 )
 
 func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
@@ -57,7 +59,7 @@ func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
 	allow := func(*url.URL) error { return nil }
 	inactive := &fakeRun{out: []byte("inactive\n"), outputErr: errors.New("exit status 3")}
 	var stdout, stderr bytes.Buffer
-	if err := updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, allow, inactive, &stdout, &stderr); err != nil {
+	if err := updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, allow, paths.Layout{}, inactive, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.Join(inactive.calls, "\n"), "restart") {
@@ -104,7 +106,7 @@ func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
 	active := &fakeRun{out: []byte("active\n")}
 	stdout.Reset()
 	stderr.Reset()
-	if err := updateExe(context.Background(), srv2.Client(), srv2.URL+"/", exe, allow, active, &stdout, &stderr); err != nil {
+	if err := updateExe(context.Background(), srv2.Client(), srv2.URL+"/", exe, allow, paths.Layout{}, active, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(active.calls, "\n")
@@ -141,7 +143,7 @@ func TestUpdateRejectsBadChecksumAndLeavesNoTemp(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err = updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, func(*url.URL) error { return nil }, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
+	err = updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, func(*url.URL) error { return nil }, paths.Layout{}, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("bad checksum was installed")
 	}
@@ -176,7 +178,7 @@ func TestUpdateDoesNotFetchOffAllowlist(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := updateExe(context.Background(), internal.Client(), internal.URL+"/", exe, validateReleaseURL, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
+	err := updateExe(context.Background(), internal.Client(), internal.URL+"/", exe, validateReleaseURL, paths.Layout{}, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("non-allowlisted URL was accepted")
 	}
@@ -250,5 +252,27 @@ func TestReleaseURLPolicy(t *testing.T) {
 		if ipBlocked(net.ParseIP(raw)) {
 			t.Fatalf("blocked public %s", raw)
 		}
+	}
+}
+
+func TestReleaseAssetNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ goos, arch, want string }{
+		{"linux", "amd64", "vpnpa-linux-amd64"},
+		{"linux", "arm64", "vpnpa-linux-arm64"},
+		{"windows", "amd64", "vpnpa-windows-amd64.exe"},
+		{"windows", "arm64", "vpnpa-windows-arm64.exe"},
+	}
+	for _, tc := range cases {
+		got, err := releaseAssetFor(tc.goos, tc.arch)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s/%s got %q err %v", tc.goos, tc.arch, got, err)
+		}
+	}
+	if _, err := releaseAssetFor("darwin", "amd64"); err == nil {
+		t.Fatal("darwin accepted")
+	}
+	if _, err := releaseAssetFor("windows", "386"); err == nil {
+		t.Fatal("386 accepted")
 	}
 }
