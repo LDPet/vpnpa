@@ -120,9 +120,11 @@ func updateExe(ctx context.Context, client *http.Client, base, exe string, polic
 	if err := f.Close(); err != nil {
 		return err
 	}
-	// Подмена по имени. Живой процесс продолжает исполнять старый inode
-	// (ядро помечает exe как deleted). Следующий старт откроет уже новый файл.
-	if err := os.Rename(tmp, exe); err != nil {
+	// Подмена по имени. В запущенный файл не пишем.
+	// На Linux rename оставляет процесс на старом inode. На Windows
+	// работающий exe сначала переименовывается в *.old, затем на его место
+	// встаёт временный файл.
+	if err := replaceExecutable(tmp, exe); err != nil {
 		return err
 	}
 	installed = true
@@ -131,27 +133,31 @@ func updateExe(ctx context.Context, client *http.Client, base, exe string, polic
 		_ = d.Close()
 	}
 	_, _ = fmt.Fprintf(stdout, "обновлено %s\n", exe)
-	if serviceActive(ctx, run) {
-		_, _ = fmt.Fprintln(stderr, "перезапуск vpnpa.service")
-		if err := run.Run(ctx, "systemctl", "--user", "restart", "vpnpa.service"); err != nil {
-			return err
-		}
-	}
-	return nil
+	return restartUpdated(ctx, run, exe, stderr)
 }
 
 func releaseAsset() (string, error) {
-	if runtime.GOOS != "linux" {
-		return "", fmt.Errorf("неподдерживаемая ОС %s", runtime.GOOS)
+	return releaseAssetFor(runtime.GOOS, runtime.GOARCH)
+}
+
+func releaseAssetFor(goos, goarch string) (string, error) {
+	switch goos {
+	case "linux":
+		switch goarch {
+		case "amd64":
+			return "vpnpa-linux-amd64", nil
+		case "arm64":
+			return "vpnpa-linux-arm64", nil
+		}
+	case "windows":
+		switch goarch {
+		case "amd64":
+			return "vpnpa-windows-amd64.exe", nil
+		case "arm64":
+			return "vpnpa-windows-arm64.exe", nil
+		}
 	}
-	switch runtime.GOARCH {
-	case "amd64":
-		return "vpnpa-linux-amd64", nil
-	case "arm64":
-		return "vpnpa-linux-arm64", nil
-	default:
-		return "", fmt.Errorf("неподдерживаемая архитектура %s", runtime.GOARCH)
-	}
+	return "", fmt.Errorf("неподдерживаемая ОС %s/%s", goos, goarch)
 }
 
 func checksumFor(sums, name string) (string, error) {
@@ -334,12 +340,4 @@ func ipBlocked(ip net.IP) bool {
 		}
 	}
 	return false
-}
-
-func serviceActive(ctx context.Context, run Runner) bool {
-	out, err := run.Output(ctx, "systemctl", "--user", "is-active", "vpnpa.service")
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) == "active"
 }

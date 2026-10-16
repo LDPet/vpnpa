@@ -252,3 +252,25 @@ func TestReleaseURLPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestReleaseAssetNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ goos, arch, want string }{
+		{"linux", "amd64", "vpnpa-linux-amd64"},
+		{"linux", "arm64", "vpnpa-linux-arm64"},
+		{"windows", "amd64", "vpnpa-windows-amd64.exe"},
+		{"windows", "arm64", "vpnpa-windows-arm64.exe"},
+	}
+	for _, tc := range cases {
+		got, err := releaseAssetFor(tc.goos, tc.arch)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s/%s got %q err %v", tc.goos, tc.arch, got, err)
+		}
+	}
+	if _, err := releaseAssetFor("darwin", "amd64"); err == nil {
+		t.Fatal("darwin accepted")
+	}
+	if _, err := releaseAssetFor("windows", "386"); err == nil {
+		t.Fatal("386 accepted")
+	}
+}
