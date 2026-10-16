@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LDPet/vpnpa/internal/logx"
+	"github.com/LDPet/vpnpa/internal/paths"
 )
 
 // tailLog печатает последние n строк файла. follow дочитывает новые байты,
@@ -87,6 +88,30 @@ func writeLastLines(w io.Writer, raw []byte, n int) error {
 		}
 	}
 	return nil
+}
+
+// trayLaunchArgs — аргументы фонового процесса с теми же config и state,
+// что у команды, которая его породила. Голый `tray` сбросил бы пути на AppData.
+func trayLaunchArgs(layout paths.Layout) []string {
+	args := make([]string, 0, 5)
+	if layout.ConfigPath != "" {
+		args = append(args, "--config", layout.ConfigPath)
+	}
+	if layout.StateDir != "" {
+		args = append(args, "--state-dir", layout.StateDir)
+	}
+	args = append(args, "tray")
+	return args
+}
+
+// autostartCommand — строка для HKCU Run: exe и те же пути, что у enable.
+func autostartCommand(exe string, layout paths.Layout) string {
+	parts := make([]string, 0, 6)
+	parts = append(parts, quoteCmdLine(exe))
+	for _, a := range trayLaunchArgs(layout) {
+		parts = append(parts, quoteCmdLine(a))
+	}
+	return strings.Join(parts, " ")
 }
 
 // quoteCmdLine готовит один аргумент командной строки Windows.

@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/LDPet/vpnpa/internal/paths"
 )
 
 func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
@@ -57,7 +59,7 @@ func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
 	allow := func(*url.URL) error { return nil }
 	inactive := &fakeRun{out: []byte("inactive\n"), outputErr: errors.New("exit status 3")}
 	var stdout, stderr bytes.Buffer
-	if err := updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, allow, inactive, &stdout, &stderr); err != nil {
+	if err := updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, allow, paths.Layout{}, inactive, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.Join(inactive.calls, "\n"), "restart") {
@@ -104,7 +106,7 @@ func TestUpdateReplacesByRenameAndRestartsOnlyIfActive(t *testing.T) {
 	active := &fakeRun{out: []byte("active\n")}
 	stdout.Reset()
 	stderr.Reset()
-	if err := updateExe(context.Background(), srv2.Client(), srv2.URL+"/", exe, allow, active, &stdout, &stderr); err != nil {
+	if err := updateExe(context.Background(), srv2.Client(), srv2.URL+"/", exe, allow, paths.Layout{}, active, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(active.calls, "\n")
@@ -141,7 +143,7 @@ func TestUpdateRejectsBadChecksumAndLeavesNoTemp(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err = updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, func(*url.URL) error { return nil }, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
+	err = updateExe(context.Background(), srv.Client(), srv.URL+"/", exe, func(*url.URL) error { return nil }, paths.Layout{}, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("bad checksum was installed")
 	}
@@ -176,7 +178,7 @@ func TestUpdateDoesNotFetchOffAllowlist(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := updateExe(context.Background(), internal.Client(), internal.URL+"/", exe, validateReleaseURL, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
+	err := updateExe(context.Background(), internal.Client(), internal.URL+"/", exe, validateReleaseURL, paths.Layout{}, &fakeRun{}, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("non-allowlisted URL was accepted")
 	}

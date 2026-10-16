@@ -6,7 +6,7 @@
 
 ## Сборка из исходников
 
-Нужен Go 1.27.1.
+Нужен Go 1.27.2.
 
 ```bash
 go build -o vpnpa ./cmd/vpnpa

@@ -107,7 +107,7 @@ func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 	case "disable":
 		err = cmdDisable(ctx, layout, run)
 	case "update":
-		err = cmdUpdate(ctx, run, stdout, stderr)
+		err = cmdUpdate(ctx, run, layout, stdout, stderr)
 	case "tray":
 		if code, ok := launchTrayCommand(layout, *logLevel, *logFormat, stderr); ok {
 			return code

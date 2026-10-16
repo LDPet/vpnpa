@@ -25,7 +25,7 @@ import (
 // Выход из трея останавливает процесс.
 type session struct {
 	layout paths.Layout
-	log    *slog.Logger
+	log    atomic.Pointer[slog.Logger]
 
 	op sync.Mutex
 	mu sync.Mutex
@@ -61,12 +61,9 @@ func cmdTray(layout paths.Layout, level, format string) error {
 	if err := prepareLayout(layout); err != nil {
 		return err
 	}
-	log, closeLog, err := openTrayLog(layout, level, format)
-	if err != nil {
-		return err
-	}
-	defer closeLog()
-	s := newSession(layout, log)
+	// Лог открываем только после мьютекса: проигравший гонку не должен
+	// стереть vpnpa.log уже живущего процесса.
+	s := newSession(layout, nil)
 	release, err := holdInstance(control{
 		reload: s.reload,
 		stop:   s.requestStop,
@@ -81,9 +78,15 @@ func cmdTray(layout paths.Layout, level, format string) error {
 		return err
 	}
 	defer release()
+	log, closeLog, err := openTrayLog(layout, level, format)
+	if err != nil {
+		return err
+	}
+	defer closeLog()
+	s.log.Store(log)
 	if err := s.up(); err != nil {
 		s.setNote(shortNote(err))
-		log.Warn("не включился", "err", err)
+		s.logger().Warn("не включился", "err", err)
 	}
 	systray.Run(s.onReady, func() {
 		s.haltOnce.Do(func() { close(s.stopLoop) })
@@ -93,16 +96,25 @@ func cmdTray(layout paths.Layout, level, format string) error {
 }
 
 func newSession(layout paths.Layout, log *slog.Logger) *session {
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
-	}
-	return &session{
+	s := &session{
 		layout:   layout,
-		log:      log,
 		changed:  make(chan struct{}, 1),
 		stopLoop: make(chan struct{}),
 		items:    map[string]*systray.MenuItem{},
 	}
+	if log != nil {
+		s.log.Store(log)
+	}
+	return s
+}
+
+var discardLogger = slog.New(slog.DiscardHandler)
+
+func (s *session) logger() *slog.Logger {
+	if l := s.log.Load(); l != nil {
+		return l
+	}
+	return discardLogger
 }
 
 func (s *session) onReady() {
@@ -156,7 +168,7 @@ func (s *session) loop() {
 func (s *session) upFromUI() {
 	if err := s.up(); err != nil {
 		s.setNote(shortNote(err))
-		s.log.Warn("не включился", "err", err)
+		s.logger().Warn("не включился", "err", err)
 	}
 }
 
@@ -208,7 +220,7 @@ func (s *session) up() error {
 		File:       f,
 		ConfigPath: s.layout.ConfigPath,
 		StateDir:   s.layout.StateDir,
-		Logger:     s.log,
+		Logger:     s.logger(),
 		Signals:    false,
 	})
 	done := make(chan struct{})
@@ -268,7 +280,7 @@ func (s *session) reload() {
 		return
 	}
 	if err := s.app.Reload(context.Background()); err != nil {
-		s.log.Warn("ошибка перечитывания конфига", "err", err)
+		s.logger().Warn("ошибка перечитывания конфига", "err", err)
 	}
 }
 

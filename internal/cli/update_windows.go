@@ -9,6 +9,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/LDPet/vpnpa/internal/paths"
 )
 
 // replaceExecutable не пишет в запущенный exe. Windows позволяет переименовать
@@ -39,7 +41,7 @@ func replaceExecutable(tmp, exe string) error {
 	return nil
 }
 
-func restartUpdated(_ context.Context, _ Runner, exe string, stderr io.Writer) error {
+func restartUpdated(_ context.Context, _ Runner, exe string, layout paths.Layout, stderr io.Writer) error {
 	if !instanceRunning() {
 		return nil
 	}
@@ -50,5 +52,5 @@ func restartUpdated(_ context.Context, _ Runner, exe string, stderr io.Writer) e
 	if !waitInstanceGone(10 * time.Second) {
 		return fmt.Errorf("vpnpa не остановился")
 	}
-	return spawnDetached(exe, "tray")
+	return spawnDetached(exe, trayLaunchArgs(layout)...)
 }

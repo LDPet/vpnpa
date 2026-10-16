@@ -92,7 +92,7 @@ func startProxy(_ context.Context, layout paths.Layout, _ Runner) error {
 	if err != nil {
 		return err
 	}
-	return spawnDetached(exe, "--config", layout.ConfigPath, "--state-dir", layout.StateDir, "tray")
+	return spawnDetached(exe, trayLaunchArgs(layout)...)
 }
 
 func cmdDown(_ context.Context, _ paths.Layout, _ Runner) error {
@@ -108,7 +108,7 @@ func cmdDown(_ context.Context, _ paths.Layout, _ Runner) error {
 	return nil
 }
 
-func cmdEnable(_ context.Context, _ paths.Layout, _ Runner, stdout io.Writer) error {
+func cmdEnable(_ context.Context, layout paths.Layout, _ Runner, stdout io.Writer) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -118,7 +118,7 @@ func cmdEnable(_ context.Context, _ paths.Layout, _ Runner, stdout io.Writer) er
 		return err
 	}
 	defer func() { _ = k.Close() }()
-	if err := k.SetStringValue(runValueName, quoteCmdLine(exe)); err != nil {
+	if err := k.SetStringValue(runValueName, autostartCommand(exe, layout)); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(stdout, "Автозапуск включён: vpnpa стартует при входе в Windows.")

@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/LDPet/vpnpa/internal/paths"
 )
 
 func TestTrayStatusText(t *testing.T) {
@@ -34,6 +36,19 @@ func TestQuoteCmdLine(t *testing.T) {
 	}
 	if got := quoteCmdLine(""); got != `""` {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestTrayLaunchArgsKeepPaths(t *testing.T) {
+	layout := paths.Layout{ConfigPath: `C:\Program Files\vpnpa\config.yaml`, StateDir: `D:\state`}
+	got := trayLaunchArgs(layout)
+	want := []string{"--config", layout.ConfigPath, "--state-dir", layout.StateDir, "tray"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("%q", got)
+	}
+	cmd := autostartCommand(`C:\Program Files\vpnpa.exe`, layout)
+	if cmd != `"C:\Program Files\vpnpa.exe" --config "C:\Program Files\vpnpa\config.yaml" --state-dir D:\state tray` {
+		t.Fatalf("%q", cmd)
 	}
 }
 

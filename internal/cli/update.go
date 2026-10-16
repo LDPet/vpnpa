@@ -22,6 +22,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/LDPet/vpnpa/internal/paths"
 )
 
 const (
@@ -30,9 +32,10 @@ const (
 	maxSumsBytes   = 1 << 20
 )
 
-// cmdUpdate качает релиз linux/amd64 или linux/arm64 с GitHub и подменяет
+// cmdUpdate качает релиз текущей ОС и архитектуры с GitHub и подменяет
 // текущий исполняемый файл. Симлинк разворачивается: меняется сам файл, не ссылка.
-func cmdUpdate(ctx context.Context, run Runner, stdout, stderr io.Writer) error {
+// layout уходит в перезапуск, чтобы Windows снова открыл те же config и state.
+func cmdUpdate(ctx context.Context, run Runner, layout paths.Layout, stdout, stderr io.Writer) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -41,7 +44,7 @@ func cmdUpdate(ctx context.Context, run Runner, stdout, stderr io.Writer) error 
 	if err != nil {
 		return err
 	}
-	return updateExe(ctx, defaultReleaseClient(), releaseBase, exe, validateReleaseURL, run, stdout, stderr)
+	return updateExe(ctx, defaultReleaseClient(), releaseBase, exe, validateReleaseURL, layout, run, stdout, stderr)
 }
 
 func defaultReleaseClient() *http.Client {
@@ -65,7 +68,7 @@ func releaseRedirect(req *http.Request, via []*http.Request) error {
 // же каталоге нужен, чтобы rename был атомарен и не пересекал файловые системы.
 // Каталог синхронизируется следом. Неуспех до rename удаляет временный файл.
 // Рестарт user unit выполняется лишь когда `is-active` ответил active.
-func updateExe(ctx context.Context, client *http.Client, base, exe string, policy func(*url.URL) error, run Runner, stdout, stderr io.Writer) error {
+func updateExe(ctx context.Context, client *http.Client, base, exe string, policy func(*url.URL) error, layout paths.Layout, run Runner, stdout, stderr io.Writer) error {
 	asset, err := releaseAsset()
 	if err != nil {
 		return err
@@ -133,7 +136,7 @@ func updateExe(ctx context.Context, client *http.Client, base, exe string, polic
 		_ = d.Close()
 	}
 	_, _ = fmt.Fprintf(stdout, "обновлено %s\n", exe)
-	return restartUpdated(ctx, run, exe, stderr)
+	return restartUpdated(ctx, run, exe, layout, stderr)
 }
 
 func releaseAsset() (string, error) {

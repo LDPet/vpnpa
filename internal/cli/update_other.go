@@ -8,13 +8,15 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/LDPet/vpnpa/internal/paths"
 )
 
 func replaceExecutable(tmp, exe string) error {
 	return os.Rename(tmp, exe)
 }
 
-func restartUpdated(ctx context.Context, run Runner, _ string, stderr io.Writer) error {
+func restartUpdated(ctx context.Context, run Runner, _ string, _ paths.Layout, stderr io.Writer) error {
 	if !serviceActive(ctx, run) {
 		return nil
 	}
