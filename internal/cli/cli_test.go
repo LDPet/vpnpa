@@ -80,8 +80,8 @@ func TestAddRejectsWrongSchemeAndHidesPassword(t *testing.T) {
 		t.Fatalf("install %d %s", code, stderr.String())
 	}
 	stderr.Reset()
-	if code := MainWith([]string{"--config", layout.ConfigPath, "add", "socks5://127.0.0.1:9050"}, run, &bytes.Buffer{}, &stderr); code == 0 {
-		t.Fatal("add accepted socks5")
+	if code := MainWith([]string{"--config", layout.ConfigPath, "add", "https://example.invalid"}, run, &bytes.Buffer{}, &stderr); code == 0 {
+		t.Fatal("add accepted unsupported scheme")
 	}
 	stderr.Reset()
 	if code := MainWith([]string{"--config", layout.ConfigPath, "add-socks5", "vpn://abc"}, run, &bytes.Buffer{}, &stderr); code == 0 {
@@ -279,7 +279,7 @@ func TestStatusRedactsSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := MainWith([]string{"--state-dir", layout.StateDir, "--config", layout.ConfigPath, "status"}, &fakeRun{}, &stdout, &stderr); code != 0 {
+	if code := MainWith([]string{"--state-dir", layout.StateDir, "--config", layout.ConfigPath, "status", "--json"}, &fakeRun{}, &stdout, &stderr); code != 0 {
 		t.Fatal(stderr.String())
 	}
 	if strings.Contains(stdout.String(), "s3cret") || strings.Contains(stdout.String(), "AAAA") {

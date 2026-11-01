@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -92,20 +93,33 @@ func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 		err = cmdList(layout, stdout)
 	case "prefer":
 		err = cmdPrefer(layout, cmdArgs)
+		if err == nil {
+			_, _ = fmt.Fprintf(stdout, "Предпочтительный выход: %s\n", logx.Redact(cmdArgs[0]))
+		}
 	case "run":
 		err = cmdRun(layout, *logLevel, *logFormat)
 	case "up":
 		err = cmdUp(ctx, layout, run, stdout)
 	case "down":
 		err = cmdDown(ctx, layout, run)
+		if err == nil {
+			if runtime.GOOS == "windows" {
+				_, _ = fmt.Fprintln(stdout, "vpnpa остановлен.")
+			} else {
+				_, _ = fmt.Fprintln(stdout, "Сервис vpnpa остановлен.")
+			}
+		}
 	case "status":
-		err = cmdStatus(layout, stdout)
+		err = cmdStatus(ctx, layout, run, cmdArgs, stdout)
 	case "logs":
 		err = cmdLogs(ctx, layout, run, cmdArgs, stdout)
 	case "enable":
 		err = cmdEnable(ctx, layout, run, stdout)
 	case "disable":
 		err = cmdDisable(ctx, layout, run)
+		if err == nil {
+			_, _ = fmt.Fprintln(stdout, "Автозапуск выключен.")
+		}
 	case "update":
 		err = cmdUpdate(ctx, run, layout, stdout, stderr)
 	case "tray":
@@ -189,16 +203,20 @@ func cmdAdd(ctx context.Context, layout paths.Layout, run Runner, socks bool, ar
 		if socks {
 			return fmt.Errorf("использование: vpnpa add-socks5 [--id name] 'socks5://...'")
 		}
-		return fmt.Errorf("использование: vpnpa add [--id name] 'vpn://...'")
+		return fmt.Errorf("использование: vpnpa add [--id name] 'vpn://...|socks5://...'")
 	}
 	var (
 		b   config.Backend
 		err error
 	)
-	if socks {
-		b, err = config.AddSOCKS5(layout.ConfigPath, *id, fs.Arg(0))
-	} else {
-		b, err = config.Add(layout.ConfigPath, *id, fs.Arg(0))
+	uri := strings.TrimSpace(fs.Arg(0))
+	switch {
+	case socks || strings.HasPrefix(uri, "socks5://"):
+		b, err = config.AddSOCKS5(layout.ConfigPath, *id, uri)
+	case strings.HasPrefix(uri, "vpn://"):
+		b, err = config.Add(layout.ConfigPath, *id, uri)
+	default:
+		return fmt.Errorf("vpnpa add принимает ссылки vpn:// или socks5://")
 	}
 	if err != nil {
 		return err
@@ -337,21 +355,6 @@ func cmdUp(ctx context.Context, layout paths.Layout, run Runner, stdout io.Write
 	return nil
 }
 
-func cmdStatus(layout paths.Layout, stdout io.Writer) error {
-	raw, err := os.ReadFile(layout.StatusPath()) // #nosec G304 -- путь status.json задаёт раскладка
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("нет файла состояния, сервис не запущен")
-		}
-		return err
-	}
-	_, _ = fmt.Fprint(stdout, logx.Redact(string(raw)))
-	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-		_, _ = fmt.Fprintln(stdout)
-	}
-	return nil
-}
-
 func errNoBackends() error {
 	return fmt.Errorf("список бэкендов пуст, сервис не запущен. Добавьте ссылку: vpnpa add 'vpn://...'")
 }
@@ -410,14 +413,14 @@ const usage = `vpnpa — локальный прокси поверх AmneziaWG 
 
 Использование:
   vpnpa install
-  vpnpa add [--id name] 'vpn://...'
+  vpnpa add [--id name] 'vpn://...|socks5://...'
   vpnpa add-socks5 [--id name] 'socks5://...'
   vpnpa list
   vpnpa prefer <id>|auto
   vpnpa run
   vpnpa up
   vpnpa down
-  vpnpa status
+  vpnpa status [--json]
   vpnpa logs [-f]
   vpnpa enable
   vpnpa disable
