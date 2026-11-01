@@ -213,6 +213,9 @@ func (f File) Validate() error {
 	}
 	seen := map[string]struct{}{}
 	for i, b := range f.Backends {
+		if b.ID == "direct" {
+			return fmt.Errorf("backends[%d]: id direct is reserved for the built-in direct mode", i)
+		}
 		if strings.TrimSpace(b.ID) == "" {
 			return fmt.Errorf("backends[%d]: id is required", i)
 		}

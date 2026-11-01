@@ -220,10 +220,6 @@ func cmdList(layout paths.Layout, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(f.Backends) == 0 {
-		_, _ = fmt.Fprintln(stdout, "бэкендов нет")
-		return nil
-	}
 	for _, b := range f.Backends {
 		line := fmt.Sprintf("%s\t%s\tpriority=%d", b.ID, b.Type, b.Priority)
 		if b.Type == "socks5" {
@@ -233,7 +229,13 @@ func cmdList(layout paths.Layout, stdout io.Writer) error {
 		}
 		_, _ = fmt.Fprintln(stdout, logx.Redact(line))
 	}
+	_, _ = fmt.Fprintln(stdout, "direct\tdirect\tpriority=0\tDNS: system (без VPN)")
 	return nil
+}
+
+func readDirectPreference(path string) bool {
+	raw, err := os.ReadFile(path) // #nosec G304 -- путь preference задаёт layout
+	return err == nil && strings.TrimSpace(string(raw)) == "direct"
 }
 
 // cmdPrefer записывает id или "auto" в файл prefer. Демон перечитывает его
@@ -246,7 +248,7 @@ func cmdPrefer(layout paths.Layout, args []string) error {
 	if err := ensurePrivateDir(layout.StateDir); err != nil {
 		return err
 	}
-	if choice != "auto" {
+	if choice != "auto" && choice != "direct" {
 		f, err := config.Load(layout.ConfigPath)
 		if err != nil {
 			return err
@@ -304,7 +306,7 @@ func cmdUp(ctx context.Context, layout paths.Layout, run Runner, stdout io.Write
 	if err != nil {
 		return err
 	}
-	if len(f.Backends) == 0 {
+	if len(f.Backends) == 0 && !readDirectPreference(layout.PreferPath()) {
 		return errNoBackends()
 	}
 	if err := startProxy(ctx, layout, run); err != nil {
