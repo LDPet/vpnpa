@@ -102,6 +102,21 @@ func AddSOCKS5(path, id, uri string) (Backend, error) {
 	return add(path, id, "socks5", uri)
 }
 
+// Remove deletes a configured backend while preserving all other settings.
+func Remove(path, id string) error {
+	f, err := Load(path)
+	if err != nil {
+		return err
+	}
+	for i, b := range f.Backends {
+		if b.ID == id {
+			f.Backends = append(f.Backends[:i], f.Backends[i+1:]...)
+			return Save(path, f)
+		}
+	}
+	return fmt.Errorf("подключение не найдено")
+}
+
 func add(path, id, typ, uri string) (Backend, error) {
 	f, err := Load(path)
 	if err != nil {

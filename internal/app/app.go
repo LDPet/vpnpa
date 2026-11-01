@@ -45,17 +45,21 @@ type Options struct {
 	Logger   *slog.Logger
 	// Signals включает SIGINT, SIGTERM и SIGHUP. Тесты вместо этого отменяют ctx.
 	Signals bool
+	// Ready вызывается после начального запуска бэкендов и балансировщика.
+	Ready func()
 }
 
 // App — работающий демон: два входа, один балансировщик и набор бэкендов.
 type App struct {
 	opt Options
 
-	mu       sync.Mutex
-	managed  map[string]*managed
-	order    []backend.Backend
-	balancer *sticky.Sticky
-	pub      atomic.Pointer[published]
+	mu          sync.Mutex
+	lifecycleMu sync.Mutex
+	stopped     bool
+	managed     map[string]*managed
+	order       []backend.Backend
+	balancer    *sticky.Sticky
+	pub         atomic.Pointer[published]
 }
 
 type published struct {
@@ -166,6 +170,9 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	defer a.shutdown()
+	if a.opt.Ready != nil {
+		a.opt.Ready()
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -290,6 +297,14 @@ func (a *App) serve(ctx context.Context, typ, addr string) error {
 // нет в файле, останавливается. Ошибка разбора файла не трогает уже работающее:
 // upAll при ошибке создания гасит только то, что успел поднять в этой попытке.
 func (a *App) Reload(ctx context.Context) error {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if a.stopped {
+		return fmt.Errorf("reload: приложение остановлено")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if a.opt.ConfigPath == "" {
 		return fmt.Errorf("reload: config path is empty")
 	}
@@ -303,6 +318,9 @@ func (a *App) Reload(ctx context.Context) error {
 	if bal != nil {
 		bal.LockLifecycle()
 		defer bal.UnlockLifecycle()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	a.mu.Lock()
 	list, err := a.upAll(ctx, f.Backends, a.managed)
@@ -426,6 +444,9 @@ func (a *App) dropMissing(ctx context.Context, specs []config.Backend) {
 }
 
 func (a *App) shutdown() {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	a.stopped = true
 	ctx := context.Background()
 	a.mu.Lock()
 	defer a.mu.Unlock()

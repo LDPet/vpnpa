@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -32,7 +33,9 @@ type session struct {
 
 	app     *app.App
 	cancel  context.CancelFunc
+	runCtx  context.Context
 	done    chan struct{}
+	ready   chan struct{}
 	gen     int
 	running bool
 	started time.Time
@@ -51,11 +54,16 @@ type session struct {
 	preferItem *systray.MenuItem
 	autoItem   *systray.MenuItem
 	items      map[string]*systray.MenuItem
+	window     *settingsWindow
 }
 
-func cmdTray(layout paths.Layout, level, format string) error {
+func cmdTray(layout paths.Layout, level, format string, show bool) error {
 	if instanceRunning() {
-		_ = signalEvent(eventUp)
+		if show {
+			showExistingWindow()
+		} else {
+			_ = signalEvent(eventUp)
+		}
 		return nil
 	}
 	if err := prepareLayout(layout); err != nil {
@@ -64,15 +72,21 @@ func cmdTray(layout paths.Layout, level, format string) error {
 	// Лог открываем только после мьютекса: проигравший гонку не должен
 	// стереть vpnpa.log уже живущего процесса.
 	s := newSession(layout, nil)
+	s.window = newSettingsWindow(s)
 	release, err := holdInstance(control{
-		reload: s.reload,
+		reload: func() { go s.reload() },
 		stop:   s.requestStop,
 		up:     s.upFromUI,
 		down:   s.down,
+		show:   s.window.show,
 	})
 	if err != nil {
 		if err == errAlreadyRunning {
-			_ = signalEvent(eventUp)
+			if show {
+				showExistingWindow()
+			} else {
+				_ = signalEvent(eventUp)
+			}
 			return nil
 		}
 		return err
@@ -84,11 +98,13 @@ func cmdTray(layout paths.Layout, level, format string) error {
 	}
 	defer closeLog()
 	s.log.Store(log)
+	go s.window.run(show)
 	if err := s.up(); err != nil {
 		s.setNote(shortNote(err))
 		s.logger().Warn("не включился", "err", err)
 	}
 	systray.Run(s.onReady, func() {
+		s.window.close()
 		s.haltOnce.Do(func() { close(s.stopLoop) })
 		s.down()
 	})
@@ -122,6 +138,8 @@ func (s *session) onReady() {
 	systray.SetTooltip("vpnpa")
 	s.statusItem = systray.AddMenuItem("vpnpa", "")
 	s.statusItem.Disable()
+	open := systray.AddMenuItem("Открыть vpnpa", "Управление подключениями")
+	s.watchClicks(open, s.window.show)
 	s.upItem = systray.AddMenuItem("Включить", "поднять локальный прокси")
 	s.downItem = systray.AddMenuItem("Выключить", "остановить локальный прокси")
 	s.preferItem = systray.AddMenuItem("Предпочтение", "выбрать выход")
@@ -216,12 +234,14 @@ func (s *session) up() error {
 	}
 	_ = os.Remove(s.layout.StatusPath())
 	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{})
 	a := app.New(app.Options{
 		File:       f,
 		ConfigPath: s.layout.ConfigPath,
 		StateDir:   s.layout.StateDir,
 		Logger:     s.logger(),
 		Signals:    false,
+		Ready:      func() { close(ready) },
 	})
 	done := make(chan struct{})
 	s.mu.Lock()
@@ -229,7 +249,9 @@ func (s *session) up() error {
 	gen := s.gen
 	s.app = a
 	s.cancel = cancel
+	s.runCtx = ctx
 	s.done = done
+	s.ready = ready
 	s.running = true
 	s.started = time.Now()
 	s.note = ""
@@ -254,6 +276,13 @@ func (s *session) up() error {
 }
 
 func (s *session) down() {
+	// Отмена должна прерывать длительный reload, который держит s.op.
+	s.mu.Lock()
+	cancelNow := s.cancel
+	s.mu.Unlock()
+	if cancelNow != nil {
+		cancelNow()
+	}
 	s.op.Lock()
 	defer s.op.Unlock()
 	s.mu.Lock()
@@ -274,14 +303,34 @@ func (s *session) down() {
 }
 
 func (s *session) reload() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.app == nil {
-		return
-	}
-	if err := s.app.Reload(context.Background()); err != nil {
+	if err := s.reloadConfig(); err != nil {
 		s.logger().Warn("ошибка перечитывания конфига", "err", err)
 	}
+}
+
+func (s *session) reloadConfig() error {
+	s.op.Lock()
+	s.mu.Lock()
+	a, ready, done, ctx := s.app, s.ready, s.done, s.runCtx
+	s.mu.Unlock()
+	s.op.Unlock()
+	if a == nil {
+		return nil
+	}
+	select {
+	case <-ready:
+	case <-done:
+		return fmt.Errorf("прокси остановился до применения изменений")
+	}
+	s.op.Lock()
+	defer s.op.Unlock()
+	s.mu.Lock()
+	current := s.app
+	s.mu.Unlock()
+	if current != a {
+		return fmt.Errorf("прокси остановился до применения изменений")
+	}
+	return a.Reload(ctx)
 }
 
 func (s *session) refresh() {
@@ -369,8 +418,9 @@ func readPrefer(path string) string {
 type trayStatusJSON struct {
 	Current  string `json:"current"`
 	Backends []struct {
-		ID    string `json:"id"`
-		Alive bool   `json:"alive"`
+		ID      string `json:"id"`
+		Alive   bool   `json:"alive"`
+		Waiting bool   `json:"waiting"`
 	} `json:"backends"`
 }
 

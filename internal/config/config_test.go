@@ -198,3 +198,30 @@ func TestDefaultIDsPrioritiesAndEndpoint(t *testing.T) {
 		t.Fatalf("mode %o", st.Mode().Perm())
 	}
 }
+
+func TestRemovePreservesOtherBackends(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if _, err := InstallConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddSOCKS5(path, "first", "socks5://127.0.0.1:1080"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddSOCKS5(path, "second", "socks5://127.0.0.1:1081"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(path, "first"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Backends) != 1 || f.Backends[0].ID != "second" {
+		t.Fatalf("unexpected remaining backends: %v", len(f.Backends))
+	}
+	if err := Remove(path, "missing"); err == nil {
+		t.Fatal("removing a missing backend succeeded")
+	}
+}

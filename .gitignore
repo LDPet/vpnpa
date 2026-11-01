@@ -1,3 +1,4 @@
 /vpnpa
 /dist/
 *.test
+/installer-build/

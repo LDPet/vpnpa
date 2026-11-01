@@ -61,6 +61,10 @@ func cmdDown(ctx context.Context, _ paths.Layout, run Runner) error {
 	return run.Run(ctx, "systemctl", "--user", "stop", "vpnpa.service")
 }
 
+func cmdInstallerStop(context.Context, paths.Layout, Runner) error {
+	return fmt.Errorf("installer-stop доступен только на Windows")
+}
+
 func cmdEnable(ctx context.Context, _ paths.Layout, run Runner, stdout io.Writer) error {
 	if err := run.Run(ctx, "systemctl", "--user", "enable", "vpnpa.service"); err != nil {
 		return err
