@@ -435,13 +435,13 @@ func (s *Sticky) snapshotLocked() Status {
 	return st
 }
 
-func (s *Sticky) emit(st Status) {
+func (s *Sticky) emit(_ Status) {
 	if s.opt.OnStatus != nil {
 		s.emitMu.Lock()
 		defer s.emitMu.Unlock()
 		// Concurrent preference and probe updates always publish the newest view.
 		s.mu.Lock()
-		st = s.snapshotLocked()
+		st := s.snapshotLocked()
 		s.mu.Unlock()
 		s.opt.OnStatus(st)
 	}
