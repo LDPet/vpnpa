@@ -109,6 +109,8 @@ func MainWith(args []string, run Runner, stdout, stderr io.Writer) int {
 				_, _ = fmt.Fprintln(stdout, "Сервис vpnpa остановлен.")
 			}
 		}
+	case "installer-stop":
+		err = cmdInstallerStop(ctx, layout, run)
 	case "status":
 		err = cmdStatus(ctx, layout, run, cmdArgs, stdout)
 	case "logs":

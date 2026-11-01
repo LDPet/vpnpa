@@ -15,6 +15,7 @@ const (
 	eventStop   = `Local\vpnpa-stop`
 	eventUp     = `Local\vpnpa-up`
 	eventDown   = `Local\vpnpa-down`
+	eventShow   = `Local\vpnpa-show`
 )
 
 // errAlreadyRunning — в этой сессии Windows уже есть процесс vpnpa.
@@ -27,6 +28,7 @@ type control struct {
 	stop   func()
 	up     func()
 	down   func()
+	show   func()
 }
 
 // holdInstance держит мьютекс одного процесса и ждёт события, пока release
@@ -66,7 +68,19 @@ func holdInstance(c control) (func(), error) {
 		}
 		return nil, err
 	}
-	handles := []windows.Handle{reloadH, stopH, upH, downH, exitH}
+	var showH windows.Handle
+	if c.show == nil {
+		showH, err = windows.CreateEvent(nil, 0, 0, nil)
+	} else {
+		showH, err = createEvent(eventShow)
+	}
+	if err != nil {
+		for _, h := range []windows.Handle{reloadH, stopH, upH, downH, exitH} {
+			_ = windows.CloseHandle(h)
+		}
+		return nil, err
+	}
+	handles := []windows.Handle{reloadH, stopH, upH, downH, showH, exitH}
 	mu, err := createMutex()
 	if err != nil {
 		for _, h := range handles {
@@ -98,6 +112,10 @@ func holdInstance(c control) (func(), error) {
 			case windows.WAIT_OBJECT_0 + 3:
 				if c.down != nil {
 					c.down()
+				}
+			case windows.WAIT_OBJECT_0 + 4:
+				if c.show != nil {
+					c.show()
 				}
 			default:
 				return

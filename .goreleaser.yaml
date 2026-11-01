@@ -30,6 +30,8 @@ archives:
 
 checksum:
   name_template: SHA256SUMS
+  extra_files:
+    - glob: installer-build/vpnpa-setup-*.exe
 
 changelog:
   disable: true
@@ -37,3 +39,4 @@ changelog:
 release:
   extra_files:
     - glob: install.sh
+    - glob: installer-build/vpnpa-setup-*.exe

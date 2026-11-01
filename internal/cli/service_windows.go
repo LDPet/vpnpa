@@ -31,15 +31,15 @@ func launchWithoutCommand(configPath, stateDir, level, format string, stderr io.
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1, true
 	}
-	return runTray(layout, level, format, stderr)
+	return runTray(layout, level, format, stderr, true)
 }
 
 func launchTrayCommand(layout paths.Layout, level, format string, stderr io.Writer) (int, bool) {
-	return runTray(layout, level, format, stderr)
+	return runTray(layout, level, format, stderr, false)
 }
 
-func runTray(layout paths.Layout, level, format string, stderr io.Writer) (int, bool) {
-	if err := cmdTray(layout, level, format); err != nil {
+func runTray(layout paths.Layout, level, format string, stderr io.Writer, show bool) (int, bool) {
+	if err := cmdTray(layout, level, format, show); err != nil {
 		_, _ = fmt.Fprintln(stderr, logx.Redact(err.Error()))
 		return 1, true
 	}
@@ -106,6 +106,13 @@ func cmdDown(_ context.Context, _ paths.Layout, _ Runner) error {
 		return fmt.Errorf("vpnpa не остановился")
 	}
 	return nil
+}
+
+func cmdInstallerStop(ctx context.Context, layout paths.Layout, runner Runner) error {
+	if !instanceRunning() {
+		return nil
+	}
+	return cmdDown(ctx, layout, runner)
 }
 
 func cmdEnable(_ context.Context, layout paths.Layout, _ Runner, stdout io.Writer) error {
