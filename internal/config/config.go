@@ -91,6 +91,7 @@ type Backend struct {
 	ID       string `yaml:"id"`
 	Type     string `yaml:"type"`
 	Priority int    `yaml:"priority"`
+	Lazy     bool   `yaml:"lazy,omitempty"`
 	URI      string `yaml:"uri"`
 }
 

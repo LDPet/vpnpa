@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LDPet/vpnpa/internal/backend"
+	"github.com/LDPet/vpnpa/internal/balance/sticky"
 	"github.com/LDPet/vpnpa/internal/config"
 )
 
@@ -362,4 +364,182 @@ func waitListen(t *testing.T, addr string) {
 		time.Sleep(15 * time.Millisecond)
 	}
 	t.Fatalf("not listening on %s", addr)
+}
+
+func TestReloadPreservesUnchangedLazyState(t *testing.T) {
+	backend.Register("lazy-reload-test", func(cfg backend.Config, _ backend.Deps) (backend.Backend, error) {
+		return &fakeBE{id: cfg.ID, prio: cfg.Priority}, nil
+	})
+	ctx := context.Background()
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("active=%v", active), func(t *testing.T) {
+			a := New(Options{})
+			specs := []config.Backend{{ID: "reserve", Type: "lazy-reload-test", URI: "fake://reserve", Priority: 10, Lazy: true}}
+			list, err := a.upAll(ctx, specs, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.balancer = sticky.New(list, sticky.Options{CheckURLs: []string{"tcp://probe.invalid:9"}, RecoverThreshold: 1})
+			first := a.managed["reserve"].tr.inner.(*fakeBE)
+			if active {
+				a.balancer.ProbeNow(ctx)
+			}
+			ups, downs := first.counts()
+			if (active && ups != 1) || (!active && ups != 0) || downs != 0 {
+				t.Fatalf("initial: %d %d", ups, downs)
+			}
+			list, err = a.upAll(ctx, specs, a.managed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.balancer.SetBackends(list)
+			afterUp, afterDown := first.counts()
+			if afterUp != ups || afterDown != downs {
+				t.Fatalf("unchanged reserve bounced: %d %d", afterUp, afterDown)
+			}
+			if active && a.balancer.Snapshot().Current != "reserve" {
+				t.Fatal("active reserve selection lost")
+			}
+			if !active && !a.balancer.Snapshot().Backends[0].Waiting {
+				t.Fatal("idle reserve no longer waiting")
+			}
+		})
+	}
+}
+
+func TestReloadLazyFlagKeepsBackendInstance(t *testing.T) {
+	backend.Register("lazy-toggle-test", func(cfg backend.Config, _ backend.Deps) (backend.Backend, error) { return &fakeBE{id: cfg.ID}, nil })
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("active=%v", active), func(t *testing.T) {
+			ctx := context.Background()
+			a := New(Options{})
+			specs := []config.Backend{{ID: "reserve", Type: "lazy-toggle-test", URI: "fake://reserve", Lazy: true}}
+			list, err := a.upAll(ctx, specs, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.balancer = sticky.New(list, sticky.Options{CheckURLs: []string{"tcp://probe.invalid:9"}, RecoverThreshold: 1})
+			tr := a.managed["reserve"].tr
+			be := tr.inner.(*fakeBE)
+			if active {
+				a.balancer.ProbeNow(ctx)
+			}
+			beforeUp, beforeDown := be.counts()
+			specs[0].Lazy = false
+			list, err = a.upAll(ctx, specs, a.managed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.balancer.SetBackends(list)
+			afterUp, afterDown := be.counts()
+			if tr != a.managed["reserve"].tr || beforeUp != afterUp || beforeDown != afterDown {
+				t.Fatal("flag change replaced or bounced backend")
+			}
+			a.balancer.ProbeNow(ctx)
+			afterUp, afterDown = be.counts()
+			if afterUp != 1 || afterDown != 0 {
+				t.Fatalf("mode transition: ups=%d downs=%d", afterUp, afterDown)
+			}
+		})
+	}
+}
+
+func TestReloadOrdinaryToLazyPreservesOpenConnection(t *testing.T) {
+	backend.Register("lazy-drain-test", func(cfg backend.Config, _ backend.Deps) (backend.Backend, error) {
+		return &fakeBE{id: cfg.ID, prio: cfg.Priority}, nil
+	})
+	ctx := context.Background()
+	a := New(Options{})
+	specs := []config.Backend{{ID: "first", Type: "lazy-drain-test", URI: "fake://first", Priority: 10}, {ID: "second", Type: "lazy-drain-test", URI: "fake://second", Priority: 1}}
+	list, err := a.upAll(ctx, specs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.balancer = sticky.New(list, sticky.Options{CheckURLs: []string{"tcp://probe.invalid:9"}, RecoverThreshold: 1})
+	a.balancer.ProbeNow(ctx)
+	first := a.managed["first"].tr.inner.(*fakeBE)
+	c, err := a.balancer.DialContext(ctx, "tcp", "user.invalid:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs[0].Lazy = true
+	list, err = a.upAll(ctx, specs, a.managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.balancer.SetBackends(list)
+	a.balancer.ProbeNow(ctx)
+	if a.balancer.Snapshot().Current != "second" {
+		t.Fatal("ordinary replacement was not selected")
+	}
+	_, downs := first.counts()
+	if downs != 0 {
+		t.Fatal("lazy transition closed backend with active connection")
+	}
+	_ = c.Close()
+	_, downs = first.counts()
+	if downs != 1 {
+		t.Fatalf("backend downs after close: %d", downs)
+	}
+}
+
+type blockingReloadBE struct {
+	*fakeBE
+	started chan struct{}
+	unblock chan struct{}
+}
+
+func (b *blockingReloadBE) Up(ctx context.Context) error {
+	close(b.started)
+	<-b.unblock
+	return b.fakeBE.Up(ctx)
+}
+func TestReloadWaitsForInFlightModeStart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	b := &blockingReloadBE{fakeBE: &fakeBE{id: "reserve"}, started: make(chan struct{}), unblock: make(chan struct{})}
+	backend.Register("blocking-reload-test", func(backend.Config, backend.Deps) (backend.Backend, error) { return b, nil })
+	prev := config.KnownTypes.Backends
+	config.KnownTypes.Backends = append(append([]string{}, prev...), "blocking-reload-test")
+	t.Cleanup(func() { config.KnownTypes.Backends = prev })
+	a := New(Options{ConfigPath: cfgPath})
+	specs := []config.Backend{{ID: "reserve", Type: "blocking-reload-test", URI: "fake://reserve", Lazy: true}}
+	list, err := a.upAll(ctx, specs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.balancer = sticky.New(list, sticky.Options{CheckURLs: []string{"tcp://probe.invalid:9"}, RecoverThreshold: 1})
+	a.managed["reserve"].tr.setLazy(false)
+	if err := os.WriteFile(cfgPath, []byte(yamlBackends("127.0.0.1:1080", "127.0.0.1:8080", "")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	doneCycle := make(chan struct{})
+	go func() { a.balancer.ProbeNow(ctx); close(doneCycle) }()
+	<-b.started
+	doneReload := make(chan error, 1)
+	go func() { doneReload <- a.Reload(ctx) }()
+	select {
+	case err := <-doneReload:
+		t.Fatalf("reload returned during Up: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(b.unblock)
+	select {
+	case <-doneCycle:
+	case <-time.After(time.Second):
+		t.Fatal("cycle stuck")
+	}
+	select {
+	case err := <-doneReload:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reload stuck")
+	}
+	ups, downs := b.counts()
+	if ups != 1 || downs != 1 {
+		t.Fatalf("lifecycle after remove: ups=%d downs=%d", ups, downs)
+	}
 }

@@ -71,6 +71,8 @@ type BackendStatus struct {
 	Priority int    `json:"priority"`
 	Alive    bool   `json:"alive"`
 	Endpoint string `json:"endpoint,omitempty"`
+	Lazy     bool   `json:"lazy,omitempty"`
+	Waiting  bool   `json:"waiting,omitempty"`
 }
 
 // Status — снимок, который печатает `vpnpa status` и пишет демон.
@@ -95,6 +97,13 @@ type health struct {
 	failStreak  int
 	nextRestart time.Time
 	restarting  bool
+	active      bool
+	draining    bool
+	users       int
+	waitUntil   time.Time
+	everCurrent bool
+	initialized bool
+	lazy        bool
 }
 
 type currentBox struct {
@@ -107,6 +116,7 @@ type currentBox struct {
 type Sticky struct {
 	opt Options
 
+	cycleMu sync.Mutex
 	mu      sync.Mutex
 	order   []backend.Backend
 	byID    map[string]backend.Backend
@@ -192,6 +202,11 @@ func (s *Sticky) Run(ctx context.Context) {
 	}
 }
 
+// LockLifecycle serializes application reload with probes and backend startup.
+// The caller must pair it with UnlockLifecycle after publishing SetBackends.
+func (s *Sticky) LockLifecycle()   { s.cycleMu.Lock() }
+func (s *Sticky) UnlockLifecycle() { s.cycleMu.Unlock() }
+
 // SetBackends подменяет список для следующих циклов. Тот же указатель
 // сохраняет здоровье и серии. Затем reselect: id из prefer забирает выбор
 // только если он selectable (жив и не в restarting), даже когда прежний
@@ -218,12 +233,12 @@ func (s *Sticky) setBackendsLocked(list []backend.Backend) {
 			// Новый экземпляр того же id сохраняет alive, чтобы текущий выбор
 			// не сбросился на перезагрузке, но серии обнуляются: туннель другой.
 			keep := false
-			if ok {
+			if ok && !backend.LazyOf(b) {
 				if h := s.health[b.ID()]; h != nil {
 					keep = h.alive
 				}
 			}
-			s.health[b.ID()] = &health{alive: keep}
+			s.health[b.ID()] = &health{alive: keep, active: !backend.LazyOf(b), initialized: keep, lazy: backend.LazyOf(b)}
 		}
 	}
 	for id := range s.health {
@@ -232,7 +247,7 @@ func (s *Sticky) setBackendsLocked(list []backend.Backend) {
 		}
 	}
 	if s.current != nil {
-		if b, ok := next[s.current.ID()]; ok {
+		if b, ok := next[s.current.ID()]; ok && (b == s.current || !backend.LazyOf(b)) {
 			s.current = b
 		} else {
 			s.current = nil
@@ -247,7 +262,16 @@ func (s *Sticky) setBackendsLocked(list []backend.Backend) {
 // Ошибка dial выбор не меняет: одна ошибка пользователя — не повод бросить
 // туннель. Она лишь просит внеочередную пробу текущего.
 func (s *Sticky) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	s.mu.Lock()
 	box := s.ptr.Load()
+	var reservation *health
+	if box != nil && box.b != nil {
+		reservation = s.health[box.b.ID()]
+		if reservation != nil {
+			reservation.users++
+		}
+	}
+	s.mu.Unlock()
 	if box == nil || box.b == nil {
 		s.opt.Logger.Warn("нет живых бэкендов", "conn_id", logx.ConnID(ctx), "addr", address)
 		return nil, dialer.ErrNoHealthyBackend
@@ -256,6 +280,9 @@ func (s *Sticky) DialContext(ctx context.Context, network, address string) (net.
 	start := time.Now()
 	c, err := b.DialContext(ctx, network, address)
 	if err != nil {
+		if reservation != nil {
+			s.releaseLazy(b, reservation)
+		}
 		s.opt.Logger.Warn("ошибка dial",
 			"conn_id", logx.ConnID(ctx),
 			"backend", b.ID(),
@@ -267,6 +294,13 @@ func (s *Sticky) DialContext(ctx context.Context, network, address string) (net.
 		return nil, fmt.Errorf("backend %s: %w", b.ID(), err)
 	}
 	s.opt.Logger.Debug("dial", "conn_id", logx.ConnID(ctx), "backend", b.ID(), "addr", address, "duration", time.Since(start))
+	if reservation != nil {
+		wrapped := &lazyConn{Conn: c, closeFn: func() { s.releaseLazy(b, reservation) }}
+		if cw, ok := c.(interface{ CloseWrite() error }); ok {
+			return &lazyConnCloseWrite{lazyConn: wrapped, closeWriter: cw}, nil
+		}
+		return wrapped, nil
+	}
 	return c, nil
 }
 
@@ -295,6 +329,8 @@ func (s *Sticky) snapshotLocked() Status {
 			Priority: b.Priority(),
 			Alive:    alive,
 			Endpoint: backend.EndpointOf(b),
+			Lazy:     backend.LazyOf(b),
+			Waiting:  backend.LazyOf(b) && (h == nil || !h.active),
 		})
 	}
 	return st
@@ -320,9 +356,12 @@ type probeResult struct {
 }
 
 func (s *Sticky) cycle(ctx context.Context) {
+	s.cycleMu.Lock()
+	defer s.cycleMu.Unlock()
 	if ctx.Err() != nil {
 		return
 	}
+	s.syncModes(ctx)
 	backends := s.backendSnapshot()
 	results := make([]probeResult, len(backends))
 	var wg sync.WaitGroup
@@ -342,13 +381,83 @@ func (s *Sticky) cycle(ctx context.Context) {
 		return
 	}
 	s.apply(ctx, results)
+	s.manageLazy(ctx)
+}
+
+// syncModes applies a lazy flag change without replacing an unchanged backend.
+func (s *Sticky) syncModes(ctx context.Context) {
+	s.mu.Lock()
+	type pendingStart struct {
+		b backend.Backend
+		h *health
+	}
+	var start []pendingStart
+	for _, b := range s.order {
+		h := s.health[b.ID()]
+		if h == nil {
+			continue
+		}
+		lazy := backend.LazyOf(b)
+		if lazy {
+			h.lazy = true
+			continue
+		}
+		if h.lazy {
+			if h.restarting {
+				continue
+			}
+			h.lazy = false
+			if h.draining {
+				h.draining = false
+				h.waitUntil = time.Time{}
+				h.nextRestart = time.Time{}
+				h.active = true
+				h.alive = false
+				h.okStreak = 0
+				h.failStreak = 0
+				h.initialized = false
+			}
+			if !h.active {
+				h.active = true
+				h.alive = false
+				h.okStreak = 0
+				h.failStreak = 0
+				h.initialized = false
+				start = append(start, pendingStart{b, h})
+			}
+		}
+	}
+	s.mu.Unlock()
+	for _, pending := range start {
+		b := pending.b
+		if err := b.Up(ctx); err != nil {
+			s.opt.Logger.Warn("ошибка поднятия бэкенда", "backend", b.ID(), "err", safeErr(err))
+		}
+		s.mu.Lock()
+		same := s.sameInstanceLocked(b) && s.health[b.ID()] == pending.h
+		stale := !same || backend.LazyOf(b) || ctx.Err() != nil
+		if stale && same {
+			pending.h.active = false
+			pending.h.alive = false
+		}
+		s.mu.Unlock()
+		if stale {
+			if err := b.Down(context.Background()); err != nil {
+				s.opt.Logger.Warn("ошибка остановки бэкенда", "backend", b.ID(), "err", safeErr(err))
+			}
+		}
+	}
 }
 
 func (s *Sticky) backendSnapshot() []backend.Backend {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]backend.Backend, len(s.order))
-	copy(out, s.order)
+	out := make([]backend.Backend, 0, len(s.order))
+	for _, b := range s.order {
+		if s.health[b.ID()].active && !s.health[b.ID()].restarting {
+			out = append(out, b)
+		}
+	}
 	return out
 }
 
@@ -372,6 +481,9 @@ func (s *Sticky) apply(ctx context.Context, results []probeResult) {
 		}
 		wasAlive := h.alive
 		becameDead, becameAlive := h.observe(r.ok, s.opt.FailThreshold, s.opt.RecoverThreshold)
+		if becameAlive || h.failStreak >= s.opt.FailThreshold {
+			h.initialized = true
+		}
 		s.logProbe(r, h)
 		if !r.ok && wasAlive && !becameDead {
 			s.opt.Logger.Warn("проба к порогу",
@@ -392,10 +504,10 @@ func (s *Sticky) apply(ctx context.Context, results []probeResult) {
 			// бэкенд больше не selectable, даже когда живой замены нет.
 			// Сам Down+Up не в этом цикле. Его пустят те циклы, где now >= nextRestart.
 			h.nextRestart = s.now().Add(s.opt.RestartInterval)
-			if !isCurrent && !h.restarting {
+			if !backend.LazyOf(r.b) && !isCurrent && !h.restarting {
 				jobs = append(jobs, job{b: r.b})
 			}
-		} else if s.restartWantedLocked(h, r.b.ID()) {
+		} else if !backend.LazyOf(r.b) && s.restartWantedLocked(h, r.b.ID()) {
 			h.nextRestart = s.now().Add(s.opt.RestartInterval)
 			jobs = append(jobs, job{b: r.b})
 		}
@@ -551,6 +663,8 @@ func (s *Sticky) sameInstanceLocked(b backend.Backend) bool {
 }
 
 func (s *Sticky) probeCurrent(ctx context.Context) {
+	s.cycleMu.Lock()
+	defer s.cycleMu.Unlock()
 	s.mu.Lock()
 	b := s.current
 	s.mu.Unlock()
@@ -585,7 +699,13 @@ func (s *Sticky) reselectLocked(why string) {
 		}
 	}
 	if next == nil && s.current != nil && s.selectableLocked(s.current.ID()) {
-		next = s.current
+		normal := s.highestNormalLocked()
+		if backend.LazyOf(s.current) && normal != nil {
+			next = normal
+			reason = why
+		} else {
+			next = s.current
+		}
 	}
 	if next == nil {
 		next = s.highestSelectableLocked()
@@ -603,6 +723,11 @@ func (s *Sticky) assignLocked(next backend.Backend, reason string) {
 	from := idOf(s.current)
 	to := idOf(next)
 	s.current = next
+	if next != nil && backend.LazyOf(next) {
+		if h := s.health[next.ID()]; h != nil {
+			h.everCurrent = true
+		}
+	}
 	// Публикуется конкретный указатель. Тот же id может быть новым экземпляром,
 	// а DialContext читает этот указатель, не поле current.
 	s.publishLocked(next)
@@ -644,11 +769,189 @@ func (s *Sticky) highestSelectableLocked() backend.Backend {
 		if !s.selectableLocked(b.ID()) {
 			continue
 		}
-		if best == nil || b.Priority() > best.Priority() {
+		if best == nil || (backend.LazyOf(best) && !backend.LazyOf(b)) || (backend.LazyOf(best) == backend.LazyOf(b) && b.Priority() > best.Priority()) {
 			best = b
 		}
 	}
 	return best
+}
+
+// highestNormalLocked returns the highest priority ordinary healthy backend.
+func (s *Sticky) highestNormalLocked() backend.Backend {
+	var best backend.Backend
+	for _, b := range s.order {
+		if !backend.LazyOf(b) && s.selectableLocked(b.ID()) && (best == nil || b.Priority() > best.Priority()) {
+			best = b
+		}
+	}
+	return best
+}
+
+// lazyConn keeps an old reserve alive until its user connections finish.
+type lazyConnCloseWrite struct {
+	*lazyConn
+	closeWriter interface{ CloseWrite() error }
+}
+
+func (c *lazyConnCloseWrite) CloseWrite() error { return c.closeWriter.CloseWrite() }
+
+type lazyConn struct {
+	net.Conn
+	once    sync.Once
+	closeFn func()
+}
+
+func (c *lazyConn) Close() error { err := c.Conn.Close(); c.once.Do(c.closeFn); return err }
+func (s *Sticky) releaseLazy(b backend.Backend, h *health) {
+	s.mu.Lock()
+	h.users--
+	s.mu.Unlock()
+	s.retireLazy(b, h)
+}
+func (s *Sticky) retireLazy(b backend.Backend, h *health) {
+	s.mu.Lock()
+	if !h.draining || h.users != 0 || h.restarting || (!h.waitUntil.IsZero() && !s.restartDue(h.waitUntil)) {
+		s.mu.Unlock()
+		return
+	}
+	h.restarting = true
+	s.mu.Unlock()
+	if err := b.Down(context.Background()); err != nil {
+		s.opt.Logger.Warn("ошибка остановки резерва", "backend", b.ID(), "err", safeErr(err))
+	}
+	s.mu.Lock()
+	h.draining = false
+	h.restarting = false
+	h.waitUntil = time.Time{}
+	s.mu.Unlock()
+}
+
+// manageLazy activates at most one reserve and drains retired connections.
+func (s *Sticky) manageLazy(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	preferred := s.byID[s.prefer]
+	force := false
+	if preferred != nil && backend.LazyOf(preferred) {
+		h := s.health[preferred.ID()]
+		force = h != nil && !h.draining && !(!h.alive && h.failStreak >= s.opt.FailThreshold) && (h.nextRestart.IsZero() || s.restartDue(h.nextRestart))
+	}
+	normal := s.highestNormalLocked()
+	// A normal backend is unknown until it has either recovered or failed its
+	// configured threshold. Do not start reserves while startup probes settle.
+	unknown := false
+	for _, b := range s.order {
+		if !backend.LazyOf(b) {
+			h := s.health[b.ID()]
+			if h != nil && !h.initialized {
+				unknown = true
+			}
+		}
+	}
+	type retirement struct {
+		b backend.Backend
+		h *health
+	}
+	var retire []retirement
+	for _, b := range s.order {
+		if !backend.LazyOf(b) {
+			continue
+		}
+		h := s.health[b.ID()]
+		if h == nil {
+			continue
+		}
+		if h.active {
+			wanted := (force && (b == preferred || !s.selectableLocked(preferred.ID()))) || (!force && normal == nil)
+			failed := !h.alive && h.failStreak >= s.opt.FailThreshold
+			if !wanted || failed {
+				h.active = false
+				h.alive = false
+				h.okStreak = 0
+				h.failStreak = 0
+				h.draining = true
+				if failed {
+					h.nextRestart = s.now().Add(s.opt.RestartInterval)
+					if h.everCurrent {
+						h.waitUntil = h.nextRestart
+					}
+				}
+			}
+		}
+		if h.draining {
+			retire = append(retire, retirement{b, h})
+		}
+	}
+	s.reselectLocked("reserve")
+	s.mu.Unlock()
+	for _, r := range retire {
+		s.retireLazy(r.b, r.h)
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	normal = s.highestNormalLocked()
+	var candidate backend.Backend
+	for _, b := range s.order {
+		if !backend.LazyOf(b) {
+			continue
+		}
+		h := s.health[b.ID()]
+		if h == nil {
+			continue
+		}
+		if h.active {
+			if !force || b == preferred {
+				s.mu.Unlock()
+				return
+			}
+			continue
+		}
+		if h.draining || h.restarting {
+			continue
+		}
+		if force && b != preferred {
+			continue
+		}
+		if !force && (normal != nil || unknown) {
+			continue
+		}
+		if !h.nextRestart.IsZero() && !s.restartDue(h.nextRestart) {
+			continue
+		}
+		if candidate == nil || b.Priority() > candidate.Priority() {
+			candidate = b
+		}
+	}
+	if candidate == nil {
+		st := s.snapshotLocked()
+		s.mu.Unlock()
+		s.emit(st)
+		return
+	}
+	h := s.health[candidate.ID()]
+	h.active = true
+	h.everCurrent = false
+	s.mu.Unlock()
+	s.opt.Logger.Info("активация резерва", "backend", candidate.ID())
+	err := candidate.Up(ctx)
+	if err != nil {
+		s.opt.Logger.Warn("ошибка поднятия резерва", "backend", candidate.ID(), "err", safeErr(err))
+	}
+	s.mu.Lock()
+	same := s.sameInstanceLocked(candidate) && s.health[candidate.ID()] == h
+	s.mu.Unlock()
+	if !same {
+		_ = candidate.Down(ctx)
+		return
+	}
+	ok := err == nil && s.probe(ctx, candidate)
+	if ctx.Err() == nil {
+		s.apply(ctx, []probeResult{{b: candidate, ok: ok}})
+	}
 }
 
 // observe двигает серии. Успех обнуляет провалы и наоборот.

@@ -110,3 +110,10 @@ func EndpointOf(b Backend) string {
 	}
 	return ""
 }
+
+// LazyOf reports whether the backend is an on-demand reserve.
+func LazyOf(b Backend) bool {
+	type lazy interface{ Lazy() bool }
+	v, ok := b.(lazy)
+	return ok && v.Lazy()
+}

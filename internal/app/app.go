@@ -25,6 +25,7 @@ import (
 	"github.com/LDPet/vpnpa/internal/balance/sticky"
 	"github.com/LDPet/vpnpa/internal/config"
 	"github.com/LDPet/vpnpa/internal/ingress"
+	"github.com/LDPet/vpnpa/internal/logx"
 
 	// Пустой импорт вызывает init и регистрирует фабрики. Без этих строк
 	// backend.New и ingress.New не знают типов. app.New реестр не смотрит.
@@ -78,6 +79,7 @@ type tracked struct {
 	mu    sync.RWMutex
 	inner backend.Backend
 	prio  int
+	lazy  bool
 }
 
 func newTracked(id string, prio int, inner backend.Backend) *tracked {
@@ -92,6 +94,14 @@ func (t *tracked) Priority() int {
 	return t.prio
 }
 
+func (t *tracked) Lazy() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.lazy
+}
+
+func (t *tracked) setLazy(v bool) { t.mu.Lock(); t.lazy = v; t.mu.Unlock() }
+
 func (t *tracked) setPriority(p int) {
 	t.mu.Lock()
 	t.prio = p
@@ -100,9 +110,8 @@ func (t *tracked) setPriority(p int) {
 
 func (t *tracked) Up(ctx context.Context) error {
 	t.mu.RLock()
-	b := t.inner
-	t.mu.RUnlock()
-	return b.Up(ctx)
+	defer t.mu.RUnlock()
+	return t.inner.Up(ctx)
 }
 
 func (t *tracked) Down(ctx context.Context) error {
@@ -289,6 +298,13 @@ func (a *App) Reload(ctx context.Context) error {
 		return err
 	}
 	a.mu.Lock()
+	bal := a.balancer
+	a.mu.Unlock()
+	if bal != nil {
+		bal.LockLifecycle()
+		defer bal.UnlockLifecycle()
+	}
+	a.mu.Lock()
 	list, err := a.upAll(ctx, f.Backends, a.managed)
 	if err != nil {
 		a.mu.Unlock()
@@ -298,7 +314,6 @@ func (a *App) Reload(ctx context.Context) error {
 	a.opt.File = f
 	a.order = list
 	a.publish()
-	bal := a.balancer
 	a.mu.Unlock()
 	if bal != nil {
 		bal.SetBackends(list)
@@ -347,8 +362,10 @@ func (a *App) upAll(ctx context.Context, specs []config.Backend, prev map[string
 		if err != nil {
 			return abort(fmt.Errorf("backend %s: %w", spec.ID, err))
 		}
-		if err := b.Up(ctx); err != nil {
-			a.opt.Logger.Warn("ошибка поднятия бэкенда", "backend", spec.ID, "err", err)
+		if !spec.Lazy {
+			if err := b.Up(ctx); err != nil {
+				a.opt.Logger.Warn("ошибка поднятия бэкенда", "backend", spec.ID, "err", logx.Redact(err.Error()))
+			}
 		}
 		fresh = append(fresh, b)
 		items = append(items, item{spec: spec, fresh: b})
@@ -359,21 +376,26 @@ func (a *App) upAll(ctx context.Context, specs []config.Backend, prev map[string
 	for _, it := range items {
 		if it.keep != nil {
 			it.keep.setPriority(it.spec.Priority)
+			it.keep.setLazy(it.spec.Lazy)
 			next[it.spec.ID] = &managed{tr: it.keep, uri: it.spec.URI, typ: it.spec.Type}
 			list = append(list, it.keep)
 			continue
 		}
 		var tr *tracked
 		if prev != nil {
-			if old, ok := prev[it.spec.ID]; ok {
+			if old, ok := prev[it.spec.ID]; ok && !it.spec.Lazy && !old.tr.Lazy() {
 				tr = old.tr
 				tr.setPriority(it.spec.Priority)
 				tr.swap(ctx, it.fresh)
 			}
 		}
 		if tr == nil {
+			if old, ok := prev[it.spec.ID]; ok {
+				_ = old.tr.Down(ctx)
+			}
 			tr = newTracked(it.spec.ID, it.spec.Priority, it.fresh)
 		}
+		tr.setLazy(it.spec.Lazy)
 		next[it.spec.ID] = &managed{tr: tr, uri: it.spec.URI, typ: it.spec.Type}
 		list = append(list, tr)
 	}
