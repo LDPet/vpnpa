@@ -836,7 +836,7 @@ func (s *Sticky) manageLazy(ctx context.Context) {
 	force := false
 	if preferred != nil && backend.LazyOf(preferred) {
 		h := s.health[preferred.ID()]
-		force = h != nil && !h.draining && !(!h.alive && h.failStreak >= s.opt.FailThreshold) && (h.nextRestart.IsZero() || s.restartDue(h.nextRestart))
+		force = h != nil && !h.draining && (h.alive || h.failStreak < s.opt.FailThreshold) && (h.nextRestart.IsZero() || s.restartDue(h.nextRestart))
 	}
 	normal := s.highestNormalLocked()
 	// A normal backend is unknown until it has either recovered or failed its

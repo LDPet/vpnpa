@@ -220,7 +220,7 @@ func TestLazyPreservesCloseWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	half, ok := c.(interface{ CloseWrite() error })
 	if !ok {
 		t.Fatal("CloseWrite was lost")
