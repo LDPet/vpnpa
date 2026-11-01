@@ -211,7 +211,7 @@ func (s *session) up() error {
 	if err := f.Validate(); err != nil {
 		return err
 	}
-	if len(f.Backends) == 0 {
+	if len(f.Backends) == 0 && !readDirectPreference(s.layout.PreferPath()) {
 		return errNoBackends()
 	}
 	_ = os.Remove(s.layout.StatusPath())
@@ -326,7 +326,9 @@ func (s *session) syncPrefer() {
 	seen := map[string]struct{}{}
 	label := "Предпочтение: " + choice
 	s.preferItem.SetTitle(menuLabel(label))
-	for _, b := range f.Backends {
+	backends := append([]config.Backend(nil), f.Backends...)
+	backends = append(backends, config.Backend{ID: "direct"})
+	for _, b := range backends {
 		seen[b.ID] = struct{}{}
 		item := s.items[b.ID]
 		if item == nil {
@@ -388,7 +390,7 @@ func readTrayStatus(path string, started time.Time) (current string, alive, fres
 	alive = false
 	for _, b := range st.Backends {
 		if b.ID == st.Current && st.Current != "" {
-			alive = b.Alive
+			alive = b.Alive || b.ID == "direct"
 		}
 	}
 	return st.Current, alive, true

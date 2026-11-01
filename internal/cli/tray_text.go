@@ -168,6 +168,9 @@ func trayStatusText(running, haveFresh bool, current string, alive bool) string 
 	if current == "" {
 		return "нет живого бэкенда"
 	}
+	if current == "direct" {
+		return "текущий: direct (без VPN, системный DNS)"
+	}
 	if alive {
 		return "текущий: " + current
 	}

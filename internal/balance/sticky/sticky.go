@@ -73,6 +73,9 @@ type BackendStatus struct {
 	Endpoint string `json:"endpoint,omitempty"`
 	Lazy     bool   `json:"lazy,omitempty"`
 	Waiting  bool   `json:"waiting,omitempty"`
+	Direct   bool   `json:"direct,omitempty"`
+	DNS      string `json:"dns,omitempty"`
+	Health   string `json:"health,omitempty"`
 }
 
 // Status — снимок, который печатает `vpnpa status` и пишет демон.
@@ -116,18 +119,22 @@ type currentBox struct {
 type Sticky struct {
 	opt Options
 
-	cycleMu sync.Mutex
-	mu      sync.Mutex
-	order   []backend.Backend
-	byID    map[string]backend.Backend
-	health  map[string]*health
-	current backend.Backend
-	prefer  string
-	egress  string
+	cycleMu    sync.Mutex
+	emitMu     sync.Mutex
+	mu         sync.Mutex
+	order      []backend.Backend
+	byID       map[string]backend.Backend
+	health     map[string]*health
+	current    backend.Backend
+	prefer     string
+	egress     string
+	direct     backend.Backend
+	workCancel context.CancelFunc
 
 	ptr atomic.Pointer[currentBox]
 
-	kick chan struct{}
+	kick       chan struct{}
+	preferKick chan struct{}
 }
 
 // New собирает балансировщик. Бэкенды здесь не создаются и не поднимаются:
@@ -169,11 +176,13 @@ func New(backends []backend.Backend, opt Options) *Sticky {
 		opt.Logger = slog.New(slog.DiscardHandler)
 	}
 	s := &Sticky{
-		opt:    opt,
-		byID:   map[string]backend.Backend{},
-		health: map[string]*health{},
-		prefer: "auto",
-		kick:   make(chan struct{}, 1),
+		opt:        opt,
+		byID:       map[string]backend.Backend{},
+		health:     map[string]*health{},
+		prefer:     "auto",
+		kick:       make(chan struct{}, 1),
+		preferKick: make(chan struct{}, 1),
+		direct:     directBackend{},
 	}
 	s.setBackendsLocked(backends)
 	return s
@@ -182,24 +191,111 @@ func New(backends []backend.Backend, opt Options) *Sticky {
 // Run пробует бэкенды, пока ctx не отменён. Первый цикл выполняется сразу,
 // не дожидаясь тикера, чтобы трафик не ждал check_interval после старта.
 func (s *Sticky) Run(ctx context.Context) {
-	s.cycle(ctx)
-	s.refreshEgress(ctx)
+	s.syncPreference()
+	var preferWG sync.WaitGroup
+	preferWG.Add(1)
+	go func() {
+		defer preferWG.Done()
+		s.watchPreference(ctx)
+	}()
+	defer preferWG.Wait()
 	probeTick := time.NewTicker(s.opt.CheckInterval)
 	defer probeTick.Stop()
 	egressTick := time.NewTicker(s.opt.EgressInterval)
 	defer egressTick.Stop()
+	// A preference update pending before startup takes priority over probes.
+	select {
+	case <-s.preferKick:
+		s.preferenceWork(ctx)
+	default:
+	}
+	s.runWork(ctx, s.cycle)
+	s.runWork(ctx, s.refreshEgress)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-probeTick.C:
-			s.cycle(ctx)
+			s.runWork(ctx, s.cycle)
 		case <-egressTick.C:
-			s.refreshEgress(ctx)
+			s.runWork(ctx, s.refreshEgress)
 		case <-s.kick:
-			s.probeCurrent(ctx)
+			s.runWork(ctx, s.probeCurrent)
+		case <-s.preferKick:
+			s.preferenceWork(ctx)
 		}
 	}
+}
+
+// runWork makes in-flight network checks cancellable when preference changes.
+// The pending notification check shares mu with syncPreference, so a change
+// cannot be missed between registering cancellation and starting work.
+func (s *Sticky) runWork(ctx context.Context, work func(context.Context)) {
+	workCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	select {
+	case <-s.preferKick:
+		// Leave the signal for the main loop to process.
+		s.preferKick <- struct{}{}
+		s.mu.Unlock()
+		cancel()
+		return
+	default:
+	}
+	s.workCancel = cancel
+	s.mu.Unlock()
+	work(workCtx)
+	s.mu.Lock()
+	s.workCancel = nil
+	s.mu.Unlock()
+	cancel()
+}
+
+func (s *Sticky) preferenceWork(ctx context.Context) {
+	s.runWork(ctx, func(workCtx context.Context) {
+		s.cycleMu.Lock()
+		defer s.cycleMu.Unlock()
+		s.manageLazy(workCtx)
+		if workCtx.Err() == nil {
+			s.syncModes(workCtx)
+		}
+	})
+}
+
+// watchPreference responds while a health check or a backend startup is blocked.
+func (s *Sticky) watchPreference(ctx context.Context) {
+	s.syncPreference()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.syncPreference()
+		}
+	}
+}
+
+func (s *Sticky) syncPreference() {
+	s.mu.Lock()
+	choice := readPrefer(s.opt.PreferPath)
+	if choice == s.prefer {
+		s.mu.Unlock()
+		return
+	}
+	s.prefer = choice
+	s.reselectLocked("prefer")
+	if s.workCancel != nil {
+		s.workCancel()
+	}
+	select {
+	case s.preferKick <- struct{}{}:
+	default:
+	}
+	st := s.snapshotLocked()
+	s.mu.Unlock()
+	s.emit(st)
 }
 
 // LockLifecycle serializes application reload with probes and backend startup.
@@ -246,7 +342,7 @@ func (s *Sticky) setBackendsLocked(list []backend.Backend) {
 			delete(s.health, id)
 		}
 	}
-	if s.current != nil {
+	if s.current != nil && s.current.ID() != "direct" {
 		if b, ok := next[s.current.ID()]; ok && (b == s.current || !backend.LazyOf(b)) {
 			s.current = b
 		} else {
@@ -290,7 +386,9 @@ func (s *Sticky) DialContext(ctx context.Context, network, address string) (net.
 			"duration", time.Since(start),
 			"err", safeErr(err),
 		)
-		s.requestProbe()
+		if b.ID() != "direct" {
+			s.requestProbe()
+		}
 		return nil, fmt.Errorf("backend %s: %w", b.ID(), err)
 	}
 	s.opt.Logger.Debug("dial", "conn_id", logx.ConnID(ctx), "backend", b.ID(), "addr", address, "duration", time.Since(start))
@@ -333,11 +431,18 @@ func (s *Sticky) snapshotLocked() Status {
 			Waiting:  backend.LazyOf(b) && (h == nil || !h.active),
 		})
 	}
+	st.Backends = append(st.Backends, BackendStatus{ID: "direct", Direct: true, DNS: "system", Health: "unchecked"})
 	return st
 }
 
-func (s *Sticky) emit(st Status) {
+func (s *Sticky) emit(_ Status) {
 	if s.opt.OnStatus != nil {
+		s.emitMu.Lock()
+		defer s.emitMu.Unlock()
+		// Concurrent preference and probe updates always publish the newest view.
+		s.mu.Lock()
+		st := s.snapshotLocked()
+		s.mu.Unlock()
 		s.opt.OnStatus(st)
 	}
 }
@@ -439,6 +544,10 @@ func (s *Sticky) syncModes(ctx context.Context) {
 		if stale && same {
 			pending.h.active = false
 			pending.h.alive = false
+			// Retry a cancelled lazy-to-ordinary start on the next pass.
+			if ctx.Err() != nil && !backend.LazyOf(b) {
+				pending.h.lazy = true
+			}
 		}
 		s.mu.Unlock()
 		if stale {
@@ -569,6 +678,11 @@ func (s *Sticky) logProbe(r probeResult, h *health) {
 
 func (s *Sticky) restart(ctx context.Context, b backend.Backend) {
 	if ctx.Err() != nil {
+		s.mu.Lock()
+		if h := s.health[b.ID()]; h != nil && s.sameInstanceLocked(b) && !h.alive {
+			h.nextRestart = time.Time{}
+		}
+		s.mu.Unlock()
 		return
 	}
 	s.mu.Lock()
@@ -595,6 +709,9 @@ func (s *Sticky) restart(ctx context.Context, b backend.Backend) {
 		s.mu.Lock()
 		if s.health[b.ID()] == h {
 			h.restarting = false
+			if ctx.Err() != nil && !h.alive {
+				h.nextRestart = time.Time{}
+			}
 		}
 		s.mu.Unlock()
 	}()
@@ -668,7 +785,7 @@ func (s *Sticky) probeCurrent(ctx context.Context) {
 	s.mu.Lock()
 	b := s.current
 	s.mu.Unlock()
-	if b == nil {
+	if b == nil || b.ID() == "direct" {
 		return
 	}
 	start := time.Now()
@@ -690,6 +807,10 @@ func (s *Sticky) reselectLocked(why string) {
 	}
 	var next backend.Backend
 	reason := ""
+	if prefer == "direct" {
+		s.assignLocked(s.direct, "prefer")
+		return
+	}
 	if prefer != "auto" {
 		if b, ok := s.byID[prefer]; ok && s.selectableLocked(prefer) {
 			next = b
@@ -698,7 +819,7 @@ func (s *Sticky) reselectLocked(why string) {
 			}
 		}
 	}
-	if next == nil && s.current != nil && s.selectableLocked(s.current.ID()) {
+	if next == nil && s.current != nil && s.current.ID() != "direct" && s.selectableLocked(s.current.ID()) {
 		normal := s.highestNormalLocked()
 		if backend.LazyOf(s.current) && normal != nil {
 			next = normal
@@ -723,6 +844,9 @@ func (s *Sticky) assignLocked(next backend.Backend, reason string) {
 	from := idOf(s.current)
 	to := idOf(next)
 	s.current = next
+	if from != to {
+		s.egress = ""
+	}
 	if next != nil && backend.LazyOf(next) {
 		if h := s.health[next.ID()]; h != nil {
 			h.everCurrent = true
@@ -864,7 +988,7 @@ func (s *Sticky) manageLazy(ctx context.Context) {
 			continue
 		}
 		if h.active {
-			wanted := (force && (b == preferred || !s.selectableLocked(preferred.ID()))) || (!force && normal == nil)
+			wanted := s.prefer != "direct" && ((force && (b == preferred || !s.selectableLocked(preferred.ID()))) || (!force && normal == nil))
 			failed := !h.alive && h.failStreak >= s.opt.FailThreshold
 			if !wanted || failed {
 				h.active = false
@@ -897,6 +1021,9 @@ func (s *Sticky) manageLazy(ctx context.Context) {
 	var candidate backend.Backend
 	for _, b := range s.order {
 		if !backend.LazyOf(b) {
+			continue
+		}
+		if s.prefer == "direct" {
 			continue
 		}
 		h := s.health[b.ID()]
@@ -949,6 +1076,21 @@ func (s *Sticky) manageLazy(ctx context.Context) {
 		return
 	}
 	ok := err == nil && s.probe(ctx, candidate)
+	if ctx.Err() != nil {
+		// A preference change can cancel activation after Up has started. The
+		// candidate has never carried traffic; release it and allow a later retry.
+		s.mu.Lock()
+		same = s.sameInstanceLocked(candidate) && s.health[candidate.ID()] == h
+		if same {
+			h.active = false
+			h.alive = false
+		}
+		s.mu.Unlock()
+		if same {
+			_ = candidate.Down(context.Background())
+		}
+		return
+	}
 	if ctx.Err() == nil {
 		s.apply(ctx, []probeResult{{b: candidate, ok: ok}})
 	}
@@ -1045,7 +1187,7 @@ func (s *Sticky) refreshEgress(ctx context.Context) {
 	s.mu.Lock()
 	b := s.current
 	s.mu.Unlock()
-	if b == nil || s.opt.EgressURL == "" {
+	if b == nil || b.ID() == "direct" || s.opt.EgressURL == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.opt.CheckTimeout)
